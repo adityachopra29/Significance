@@ -1,0 +1,27 @@
+# Web API
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Config & validation
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Database
+SQLAlchemy==2.0.36
+psycopg2-binary==2.9.10
+
+# HTTP / scraping
+httpx==0.28.1
+
+# Market data & analytics
+yfinance==1.4.1
+pandas==2.2.3
+numpy==2.2.1
+
+# Scheduling (poller + worker loops)
+APScheduler==3.11.0
+
+# LLM providers are imported lazily; install only the one(s) you use.
+openai==2.41.1
+# anthropic==0.42.0
+# google-generativeai==0.8.3

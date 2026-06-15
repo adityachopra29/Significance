@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: aie_postgres
+    environment:
+      POSTGRES_USER: aie
+      POSTGRES_PASSWORD: aie
+      POSTGRES_DB: aie
+    ports:
+      - "5433:5432"
+    volumes:
+      - aie_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aie"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  aie_pgdata:
