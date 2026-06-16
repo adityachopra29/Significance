@@ -76,6 +76,16 @@ a {
   margin-top: 4px;
 }
 
+.error-banner {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 92, 108, 0.45);
+  background: rgba(255, 92, 108, 0.08);
+  color: #ffb3bc;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
 .filters {
   display: flex;
   gap: 12px;
@@ -392,6 +402,19 @@ a {
   font-size: 13px;
   margin-top: 8px;
   line-height: 1.45;
+}
+
+.card-link {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.link-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 /* Detail drawer */

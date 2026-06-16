@@ -31,6 +31,7 @@ export default function Dashboard() {
   const [eventType, setEventType] = useState("");
   const [direction, setDirection] = useState("");
   const [companyId, setCompanyId] = useState("");
+  const [sortBy, setSortBy] = useState<"score" | "recency">("score");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -43,6 +44,7 @@ export default function Dashboard() {
           event_type: eventType || undefined,
           direction: direction || undefined,
           company_id: companyId ? Number(companyId) : undefined,
+          sort_by: sortBy,
         }),
         getStats(),
       ]);
@@ -54,7 +56,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [days, minScore, eventType, direction, companyId]);
+  }, [days, minScore, eventType, direction, companyId, sortBy]);
 
   const loadCompanies = useCallback(() => {
     getCompanies().then(setCompanies).catch(() => {});
@@ -79,7 +81,7 @@ export default function Dashboard() {
     <div className="container">
       <div className="header">
         <div>
-          <div className="title">Announcement Intelligence</div>
+          <div className="title">Significance</div>
           <div className="subtitle">
             Ranked BSE corporate-announcement signals · material impact for traders
           </div>
@@ -94,6 +96,9 @@ export default function Dashboard() {
                 <b>{stats.pending}</b> pending
               </span>
               <span>
+                <b>{stats.errors}</b> errors
+              </span>
+              <span>
                 <b>{stats.companies}</b> companies
               </span>
               <span>updated {timeAgo(stats.last_announcement_at)}</span>
@@ -105,8 +110,23 @@ export default function Dashboard() {
         </div>
       </div>
       <div className="disclaimer">For research and analysis only — not investment advice.</div>
+      {stats && !stats.llm_configured && (
+        <div className="error-banner">
+          LLM is not configured: {stats.llm_error || "set LLM_PROVIDER and LLM_API_KEY."}
+        </div>
+      )}
 
       <div className="filters">
+        <label>
+          Sort by
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as "score" | "recency")}
+          >
+            <option value="score">Relevance score</option>
+            <option value="recency">Latest first</option>
+          </select>
+        </label>
         <label>
           Window
           <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
@@ -188,6 +208,17 @@ export default function Dashboard() {
               </div>
             </div>
             <div className="summary">{it.summary || it.headline}</div>
+            {it.company?.chart_url && (
+              <a
+                className="card-link"
+                href={it.company.chart_url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+              >
+                View stock chart →
+              </a>
+            )}
           </div>
         ))}
       </div>

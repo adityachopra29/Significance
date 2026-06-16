@@ -8,6 +8,8 @@ export interface Company {
   nse_symbol?: string | null;
   sector?: string | null;
   market_cap_cr?: number | null;
+  adv_cr?: number | null;
+  chart_url?: string | null;
 }
 
 export interface FeedItem {
@@ -64,6 +66,10 @@ export interface Stats {
   announcements_total: number;
   analyzed: number;
   pending: number;
+  errors: number;
+  llm_configured: boolean;
+  llm_provider?: string | null;
+  llm_error?: string | null;
   last_announcement_at?: string | null;
 }
 
@@ -74,6 +80,7 @@ export interface CompanyAdmin {
   nse_symbol?: string | null;
   sector?: string | null;
   market_cap_cr?: number | null;
+  adv_cr?: number | null;
   active: boolean;
   announcement_count: number;
   analyzed_count: number;
@@ -87,6 +94,7 @@ export async function getFeed(params: {
   event_type?: string;
   direction?: string;
   company_id?: number;
+  sort_by?: "score" | "recency";
   limit?: number;
 }): Promise<FeedResponse> {
   const q = new URLSearchParams();
@@ -96,6 +104,7 @@ export async function getFeed(params: {
   if (params.event_type) q.set("event_type", params.event_type);
   if (params.direction) q.set("direction", params.direction);
   if (params.company_id) q.set("company_id", String(params.company_id));
+  if (params.sort_by) q.set("sort_by", params.sort_by);
   const res = await fetch(`${API_URL}/api/feed?${q.toString()}`, {
     cache: "no-store",
   });

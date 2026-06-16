@@ -185,11 +185,20 @@ export default function DetailDrawer({
               </div>
             )}
 
-            {detail.attachment_url && (
+            {(detail.company?.chart_url || detail.attachment_url) && (
               <div className="section">
-                <a href={detail.attachment_url} target="_blank" rel="noreferrer">
-                  View original filing →
-                </a>
+                <div className="link-row">
+                  {detail.company?.chart_url && (
+                    <a href={detail.company.chart_url} target="_blank" rel="noreferrer">
+                      View stock chart →
+                    </a>
+                  )}
+                  {detail.attachment_url && (
+                    <a href={detail.attachment_url} target="_blank" rel="noreferrer">
+                      View original filing →
+                    </a>
+                  )}
+                </div>
               </div>
             )}
 

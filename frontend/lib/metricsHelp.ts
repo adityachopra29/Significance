@@ -57,8 +57,8 @@ export const FACTOR_HELP: Record<keyof Factors, MetricHelp> = {
   },
   liquidity: {
     description:
-      "Tradability proxy from company size (market cap). Larger, liquid names get less penalised in the final rank.",
-    scale: "0–1. 1.0 = very large cap; ~0.4 = small cap / harder to trade size.",
+      "Tradability proxy. Uses ADV (average daily traded value in ₹ crore) when available, with market cap as a fallback.",
+    scale: "0–1. 1.0 = very liquid (ADV ≥ ₹500 cr/day); ~0.55 = thin but tradable; ~0.35 = very illiquid.",
   },
   confidence: {
     description:
