@@ -55,6 +55,11 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("raw_announcements", "attachment_fetched", "BOOLEAN DEFAULT FALSE"),
     ("companies", "shares_outstanding", "DOUBLE PRECISION"),
     ("companies", "market_cap_asof", "DATE"),
+    ("announcement_analysis", "materiality_hint", "DOUBLE PRECISION"),
+    ("announcement_analysis", "surprise_hint", "DOUBLE PRECISION"),
+    ("announcement_analysis", "llm_confidence", "DOUBLE PRECISION"),
+    ("announcement_analysis", "is_routine", "BOOLEAN DEFAULT FALSE"),
+    ("announcement_analysis", "analysis_schema_version", "VARCHAR(16)"),
 ]
 
 

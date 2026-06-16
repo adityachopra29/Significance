@@ -173,6 +173,9 @@ def score(
     fe = taxonomy.EVENT_TYPE_WEIGHTS.get(llm.event_type, 0.3)
     fm = _materiality(llm, market_cap_cr)
     fs = llm.surprise_hint
+    if llm.is_routine:
+        fm = min(fm, 0.25)
+        fs = min(fs, 0.2)
     fse = abs(llm.sentiment)
     fp = _price_reaction(event_study)
     fl = _liquidity(market_cap_cr, adv_cr, company_matched)

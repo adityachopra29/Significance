@@ -35,7 +35,7 @@ class AnthropicProvider(LLMProvider):
         client = anthropic.Anthropic(api_key=self.api_key)
         resp = client.messages.create(
             model=self.model or DEFAULT_MODELS["anthropic"],
-            max_tokens=1024,
+            max_tokens=2048,
             temperature=0.1,
             system=system,
             messages=[{"role": "user", "content": user}],

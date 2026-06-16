@@ -119,6 +119,13 @@ class AnnouncementAnalysis(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     extracted: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # Raw LLM outputs (persisted for replay without re-calling the model)
+    materiality_hint: Mapped[float | None] = mapped_column(Float, nullable=True)
+    surprise_hint: Mapped[float | None] = mapped_column(Float, nullable=True)
+    llm_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_routine: Mapped[bool] = mapped_column(Boolean, default=False)
+    analysis_schema_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
     # Factor sub-scores (0..1 unless noted)
     factor_event_type: Mapped[float | None] = mapped_column(Float, nullable=True)
     factor_materiality: Mapped[float | None] = mapped_column(Float, nullable=True)

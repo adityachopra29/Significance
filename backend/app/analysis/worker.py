@@ -132,7 +132,7 @@ def process_one(aid: int) -> None:
 
     # Phase 1.5: fetch + cache the PDF attachment text (network, no open txn).
     attachment_text = snap["attachment_text"]
-    if not snap["attachment_fetched"] and snap["attachment_url"]:
+    if snap["attachment_url"] and (not snap["attachment_fetched"] or not attachment_text):
         attachment_text = pdf_extract.fetch_pdf_text(snap["attachment_url"])
         with session_scope() as session:
             ann = session.get(RawAnnouncement, aid)
@@ -148,6 +148,7 @@ def process_one(aid: int) -> None:
         attachment_text,
         market_cap_cr=snap["market_cap_cr"],
         adv_cr=snap["adv_cr"],
+        announced_at=snap["announced_at"],
     )
     es = _event_study_for(snap["yahoo_symbol"], snap["announced_at"])
     result = score(
@@ -176,6 +177,11 @@ def process_one(aid: int) -> None:
         analysis.sentiment = result.sentiment
         analysis.summary = llm.summary
         analysis.extracted = llm.extracted
+        analysis.materiality_hint = llm.materiality_hint
+        analysis.surprise_hint = llm.surprise_hint
+        analysis.llm_confidence = llm.confidence
+        analysis.is_routine = llm.is_routine
+        analysis.analysis_schema_version = llm.schema_version
         analysis.factor_event_type = result.factor_event_type
         analysis.factor_materiality = result.factor_materiality
         analysis.factor_surprise = result.factor_surprise

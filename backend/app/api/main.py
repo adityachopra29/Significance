@@ -198,6 +198,11 @@ def announcement_detail(ann_id: int, db: Session = Depends(get_db)) -> FeedItemD
         ),
         extracted=analysis.extracted,
         event_study=event_study,
+        analysis_schema_version=analysis.analysis_schema_version,
+        materiality_hint=analysis.materiality_hint,
+        surprise_hint=analysis.surprise_hint,
+        llm_confidence=analysis.llm_confidence,
+        is_routine=analysis.is_routine or False,
     )
 
 

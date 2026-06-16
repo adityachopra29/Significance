@@ -80,6 +80,11 @@ class FeedItemDetail(FeedItem):
     factors: Factors
     extracted: dict | None = None
     event_study: EventStudyOut | None = None
+    analysis_schema_version: str | None = None
+    materiality_hint: float | None = None
+    surprise_hint: float | None = None
+    llm_confidence: float | None = None
+    is_routine: bool = False
 
 
 class FeedResponse(BaseModel):
