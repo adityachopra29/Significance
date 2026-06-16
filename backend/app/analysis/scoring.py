@@ -23,8 +23,12 @@ W_SURPRISE = 0.16
 W_SENTIMENT = 0.12
 W_PRICE = 0.16
 
-# Materiality: an event worth >= 10% of market cap saturates the quant signal.
+# Materiality saturations. These turn factual extracted numbers into 0..1 scores.
 MATERIALITY_MCAP_SATURATION = 0.10
+MATERIALITY_REVENUE_SATURATION = 0.25
+MATERIALITY_EARNINGS_CHANGE_SATURATION = 0.50
+MATERIALITY_PAT_MCAP_SATURATION = 0.03
+MATERIALITY_STAKE_SATURATION = 25.0
 # Price reaction: a >= 6% day-0 abnormal return is treated as "fully reacted".
 PRICE_REACTION_AR_SCALE = 0.06
 # Time decay half-life in hours.
@@ -48,21 +52,70 @@ class ScoreResult:
     composite_score: float
 
 
+def _num(extracted: dict, key: str) -> float | None:
+    if not isinstance(extracted, dict):
+        return None
+    val = extracted.get(key)
+    if val in (None, ""):
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ratio_score(numerator: float | None, denominator: float | None, saturation: float) -> float | None:
+    if numerator is None or denominator is None or denominator <= 0:
+        return None
+    return min(1.0, abs(numerator) / denominator / saturation)
+
+
+def _pct_score(value_pct: float | None, saturation_pct: float) -> float | None:
+    if value_pct is None:
+        return None
+    return min(1.0, abs(value_pct) / 100.0 / saturation_pct)
+
+
+def _numeric_materiality(llm: LLMAnalysis, market_cap_cr: float | None) -> float | None:
+    """Ground materiality in extracted numbers where possible.
+
+    Examples:
+    - order/deal/fundraise value ÷ market cap
+    - order value ÷ revenue when both are present in the filing
+    - PAT/revenue change % for result announcements
+    - stake % for open offers / SAST / ownership changes
+    """
+    extracted = llm.extracted if isinstance(llm.extracted, dict) else {}
+    amount_cr = _num(extracted, "amount_cr") or _num(extracted, "amount")
+    revenue_cr = _num(extracted, "revenue_cr")
+    pat_cr = _num(extracted, "pat_cr")
+    yoy_pct = _num(extracted, "yoy_pct")
+    qoq_pct = _num(extracted, "qoq_pct")
+    pct_change = _num(extracted, "pct_change")
+    stake_pct = _num(extracted, "stake_pct")
+
+    scores = [
+        _ratio_score(amount_cr, market_cap_cr, MATERIALITY_MCAP_SATURATION),
+        _ratio_score(amount_cr, revenue_cr, MATERIALITY_REVENUE_SATURATION),
+        _ratio_score(pat_cr, market_cap_cr, MATERIALITY_PAT_MCAP_SATURATION),
+        _pct_score(yoy_pct, MATERIALITY_EARNINGS_CHANGE_SATURATION),
+        _pct_score(qoq_pct, MATERIALITY_EARNINGS_CHANGE_SATURATION),
+        _pct_score(pct_change, MATERIALITY_EARNINGS_CHANGE_SATURATION),
+        min(1.0, abs(stake_pct) / MATERIALITY_STAKE_SATURATION) if stake_pct is not None else None,
+    ]
+    scores = [s for s in scores if s is not None]
+    if not scores:
+        return None
+    return round(max(scores), 4)
+
+
 def _materiality(llm: LLMAnalysis, market_cap_cr: float | None) -> float:
     hint = llm.materiality_hint
-    amount = None
-    if isinstance(llm.extracted, dict):
-        amount = llm.extracted.get("amount_cr") or llm.extracted.get("amount")
-    quant = None
-    if amount and market_cap_cr and market_cap_cr > 0:
-        try:
-            ratio = float(amount) / float(market_cap_cr)
-            quant = min(1.0, ratio / MATERIALITY_MCAP_SATURATION)
-        except (TypeError, ValueError):
-            quant = None
+    quant = _numeric_materiality(llm, market_cap_cr)
     if quant is None:
         return hint
-    return round(0.6 * quant + 0.4 * hint, 4)
+    # When facts exist, let them dominate. The LLM hint is only a small tie-breaker.
+    return round(0.85 * quant + 0.15 * hint, 4)
 
 
 def _price_reaction(es: EventStudyOutput | None) -> float:
@@ -76,9 +129,19 @@ def _price_reaction(es: EventStudyOutput | None) -> float:
     return round(factor, 4)
 
 
-def _liquidity(market_cap_cr: float | None, matched: bool) -> float:
+def _liquidity(market_cap_cr: float | None, adv_cr: float | None, matched: bool) -> float:
     if not matched:
         return 0.5
+    if adv_cr is not None:
+        if adv_cr >= 500:
+            return 1.0
+        if adv_cr >= 100:
+            return 0.9
+        if adv_cr >= 25:
+            return 0.75
+        if adv_cr >= 5:
+            return 0.55
+        return 0.35
     if market_cap_cr is None:
         return 0.6
     if market_cap_cr >= 20000:
@@ -102,6 +165,7 @@ def _time_decay(announced_at: dt.datetime | None, now: dt.datetime | None = None
 def score(
     llm: LLMAnalysis,
     market_cap_cr: float | None,
+    adv_cr: float | None,
     company_matched: bool,
     event_study: EventStudyOutput | None,
     announced_at: dt.datetime | None,
@@ -111,7 +175,7 @@ def score(
     fs = llm.surprise_hint
     fse = abs(llm.sentiment)
     fp = _price_reaction(event_study)
-    fl = _liquidity(market_cap_cr, company_matched)
+    fl = _liquidity(market_cap_cr, adv_cr, company_matched)
     fc = min(1.0, llm.confidence + (0.1 if company_matched else 0.0))
     ft = _time_decay(announced_at)
 

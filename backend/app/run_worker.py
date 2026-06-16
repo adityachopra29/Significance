@@ -14,7 +14,8 @@ from sqlalchemy import func, select
 from app.analysis.worker import process_pending
 from app.config import settings
 from app.db.base import init_db, session_scope
-from app.db.models import RawAnnouncement
+from app.db.models import Company, RawAnnouncement
+from app.fundamentals import marketcap
 from app.ingestion.ingest import backfill_universe, run_ingestion
 
 logging.basicConfig(
@@ -41,9 +42,30 @@ def analyze_job() -> None:
         logger.exception("Analyze job failed")
 
 
+def marketcap_job() -> None:
+    try:
+        result = marketcap.refresh_all()
+        logger.info("Market cap refresh: %s", result)
+    except Exception:  # noqa: BLE001
+        logger.exception("Market cap job failed")
+
+
 def _is_empty() -> bool:
     with session_scope() as session:
         return (session.scalar(select(func.count()).select_from(RawAnnouncement)) or 0) == 0
+
+
+def _missing_market_caps() -> int:
+    with session_scope() as session:
+        return (
+            session.scalar(
+                select(func.count())
+                .select_from(Company)
+                .where(Company.active.is_(True))
+                .where(Company.market_cap_cr.is_(None))
+            )
+            or 0
+        )
 
 
 def main() -> None:
@@ -58,6 +80,11 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("Universe backfill failed")
 
+    # Populate market caps on first run if missing (needed for materiality/liquidity).
+    if _missing_market_caps():
+        logger.info("Refreshing market caps (missing on %d companies)...", _missing_market_caps())
+        marketcap_job()
+
     # Initial pass so there is data immediately.
     poll_job()
     analyze_job()
@@ -65,6 +92,8 @@ def main() -> None:
     scheduler = BlockingScheduler(timezone="Asia/Kolkata")
     scheduler.add_job(poll_job, "interval", seconds=settings.poll_interval_seconds, id="poll", max_instances=1)
     scheduler.add_job(analyze_job, "interval", seconds=20, id="analyze", max_instances=1)
+    # Daily market-cap refresh (after market close).
+    scheduler.add_job(marketcap_job, "cron", hour=18, minute=30, id="marketcap", max_instances=1)
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):

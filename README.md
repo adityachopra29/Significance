@@ -7,7 +7,7 @@ Turns the firehose of Indian corporate disclosures into a **ranked, explainable,
 ## What it does
 
 1. **Ingests** BSE corporate announcements for the BSE 500 universe (direct from `api.bseindia.com` — BSE is lenient to cloud IPs, so no NSE anti-bot/proxy headaches in v1).
-2. **Enriches** each announcement with a provider-agnostic LLM (event type, sentiment, materiality, plain-English summary) — with a no-API-key heuristic fallback so it runs out of the box.
+2. **Enriches** each announcement with a configured provider-agnostic LLM (event type, sentiment, materiality, plain-English summary). A real LLM provider/API key is required for analysis.
 3. **Runs an event study** on Yahoo `.NS` prices (market-model α/β → Abnormal Return, CAR, abnormal volume) to detect **under-reaction / already-priced-in**.
 4. **Scores** each item on a transparent 8-factor composite (0–100) and **ranks** them.
 5. **Serves a dashboard** (Next.js) with the ranked feed, full score breakdown, and event-study stats.
@@ -16,7 +16,7 @@ Turns the firehose of Indian corporate disclosures into a **ranked, explainable,
 
 ```
 BSE feeds ─► ingest (dedup) ─► Postgres ─► analysis worker ─► Postgres ─► FastAPI ─► Next.js dashboard
-                                               ├─ LLM (OpenAI/Anthropic/Gemini/heuristic)
+                                               ├─ LLM (OpenAI/Anthropic/Gemini)
                                                └─ event study (Yahoo .NS prices)
 ```
 
@@ -36,7 +36,7 @@ docker compose up -d            # Postgres on localhost:5432
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp ../.env.example ../.env       # defaults work for local dev (LLM_PROVIDER=heuristic)
+cp ../.env.example ../.env       # set LLM_PROVIDER + LLM_API_KEY before running the worker
 
 # Load the BSE 500 company master (seed of ~50 large caps included)
 python -m app.scripts.load_companies                 # add --enrich for market caps via Yahoo
@@ -62,15 +62,15 @@ npm run dev                       # http://localhost:3000
 | Key | Default | Notes |
 |-----|---------|-------|
 | `DATABASE_URL` | `postgresql+psycopg2://aie:aie@127.0.0.1:5433/aie` | container maps host `5433` -> container `5432` to avoid clashing with a local Postgres |
-| `LLM_PROVIDER` | `heuristic` | `heuristic` \| `openai` \| `anthropic` \| `gemini` |
+| `LLM_PROVIDER` | empty | `openai` \| `anthropic` \| `gemini` |
 | `LLM_MODEL` | (provider default) | e.g. `gpt-4o-mini` |
-| `LLM_API_KEY` | empty | required for non-heuristic providers |
+| `LLM_API_KEY` | empty | required for the configured provider |
 | `MARKET_INDEX` | `^NSEI` | Yahoo symbol used as market in the event study (Nifty 50) |
 | `POLL_INTERVAL_SECONDS` | `60` | BSE poll cadence |
 | `BACKFILL_DAYS` | `3` | initial history pull |
 | `ESTIMATION_WINDOW_DAYS` | `120` | event-study estimation window |
 
-To use a real LLM: `pip install openai` (or `anthropic` / `google-generativeai`), then set `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`.
+To analyze announcements, set `LLM_PROVIDER`, `LLM_MODEL`, and `LLM_API_KEY`. Without a configured LLM, the dashboard shows a configuration error and the worker does not silently fall back.
 
 ## Deploying (Azure)
 

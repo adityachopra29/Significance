@@ -2,8 +2,7 @@
 
 A single `LLMProvider.analyze()` contract produces a structured `LLMAnalysis`
 for an announcement. Concrete providers (OpenAI / Anthropic / Gemini) implement
-`_complete_json()`; the heuristic provider needs no API key and keeps the whole
-system runnable out of the box.
+`_complete_json()`.
 """
 from __future__ import annotations
 
@@ -21,7 +20,9 @@ VALID_EVENT_TYPES_HINT = (
 
 SYSTEM_PROMPT = (
     "You are a sell-side equity analyst for Indian markets (NSE/BSE). "
-    "Given a corporate announcement, extract structured, factual signal. "
+    "Given a corporate announcement (and, when available, the full text of its "
+    "attached filing), extract structured, factual signal. "
+    "Base your numbers on the FILING TEXT when present, not just the headline. "
     "Do not speculate or hallucinate numbers; only use what the text supports. "
     "Respond with STRICT JSON only, no prose."
 )
@@ -35,7 +36,16 @@ JSON_INSTRUCTION = f"""Return a JSON object with exactly these keys:
   "surprise_hint": number 0..1 (how unexpected vs routine this is),
   "confidence": number 0..1 (your confidence in this assessment),
   "summary": "2-3 sentence plain-English takeaway: what happened, why it matters",
-  "extracted": {{ "amount_cr": number|null, "pct_change": number|null, "stake_pct": number|null, "notes": string|null }}
+  "extracted": {{
+    "amount_cr": number|null,        // headline value in INR crore (order size, deal value, raise)
+    "revenue_cr": number|null,       // reported revenue/turnover in INR crore, if a result
+    "pat_cr": number|null,           // profit after tax in INR crore, if a result
+    "yoy_pct": number|null,          // year-on-year change % of the key metric, if stated
+    "qoq_pct": number|null,          // quarter-on-quarter change %, if stated
+    "pct_change": number|null,       // any other key percentage figure
+    "stake_pct": number|null,        // stake / shareholding % involved
+    "notes": string|null             // one short factual note
+  }}
 }}"""
 
 
@@ -49,7 +59,7 @@ class LLMAnalysis:
     confidence: float = 0.4
     summary: str = ""
     extracted: dict = field(default_factory=dict)
-    provider: str = "heuristic"
+    provider: str = ""
     model: str = ""
 
 
@@ -65,18 +75,54 @@ class LLMProvider(ABC):
         """Return the model's raw text response (expected to be JSON)."""
         raise NotImplementedError
 
-    def analyze(self, headline: str, body: str | None, company_name: str | None) -> LLMAnalysis:
-        user = self._build_prompt(headline, body, company_name)
+    def analyze(
+        self,
+        headline: str,
+        body: str | None,
+        company_name: str | None,
+        attachment_text: str | None = None,
+        market_cap_cr: float | None = None,
+        adv_cr: float | None = None,
+    ) -> LLMAnalysis:
+        user = self._build_prompt(
+            headline,
+            body,
+            company_name,
+            attachment_text,
+            market_cap_cr=market_cap_cr,
+            adv_cr=adv_cr,
+        )
         raw = self._complete_json(SYSTEM_PROMPT, user)
         return self._parse(raw)
 
-    def _build_prompt(self, headline: str, body: str | None, company_name: str | None) -> str:
+    def _build_prompt(
+        self,
+        headline: str,
+        body: str | None,
+        company_name: str | None,
+        attachment_text: str | None = None,
+        market_cap_cr: float | None = None,
+        adv_cr: float | None = None,
+    ) -> str:
         parts = [JSON_INSTRUCTION, ""]
         if company_name:
             parts.append(f"Company: {company_name}")
+        context = []
+        if market_cap_cr is not None:
+            context.append(f"market_cap_cr={market_cap_cr:.2f}")
+        if adv_cr is not None:
+            context.append(f"adv_cr={adv_cr:.2f}")
+        if context:
+            parts.append(
+                "Company context (for scale only; do not invent numbers from it): "
+                + ", ".join(context)
+            )
         parts.append(f"Headline: {headline}")
         if body and body.strip() and body.strip() != headline.strip():
-            parts.append(f"Details: {body.strip()[:4000]}")
+            parts.append(f"Details: {body.strip()[:2000]}")
+        if attachment_text and attachment_text.strip():
+            parts.append("\nFILING TEXT (extracted from the attached PDF):")
+            parts.append(attachment_text.strip()[:9000])
         return "\n".join(parts)
 
     def _parse(self, raw: str) -> LLMAnalysis:

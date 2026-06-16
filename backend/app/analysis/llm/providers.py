@@ -1,8 +1,7 @@
-"""Concrete LLM providers + a no-API-key heuristic fallback."""
+"""Concrete LLM providers."""
 from __future__ import annotations
 
-from app.analysis import taxonomy
-from app.analysis.llm.base import LLMAnalysis, LLMProvider
+from app.analysis.llm.base import LLMProvider
 
 DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
@@ -59,31 +58,3 @@ class GeminiProvider(LLMProvider):
         resp = model.generate_content(user)
         return resp.text or ""
 
-
-class HeuristicProvider(LLMProvider):
-    """Keyword-based analysis requiring no API key. Keeps the engine functional
-    out of the box and serves as a graceful fallback if an API call fails."""
-
-    name = "heuristic"
-
-    def _complete_json(self, system: str, user: str) -> str:  # pragma: no cover - unused
-        return "{}"
-
-    def analyze(self, headline: str, body: str | None, company_name: str | None) -> LLMAnalysis:
-        text = f"{headline}. {body or ''}"
-        event_type = taxonomy.classify(text)
-        direction, sentiment = taxonomy.naive_sentiment(text)
-        extracted = taxonomy.extract_numbers(text)
-        base_weight = taxonomy.EVENT_TYPE_WEIGHTS.get(event_type, 0.3)
-        return LLMAnalysis(
-            event_type=event_type,
-            direction=direction,
-            sentiment=sentiment,
-            materiality_hint=base_weight,
-            surprise_hint=0.5 if event_type not in {"board_meeting", "trading_window", "newspaper_publication"} else 0.1,
-            confidence=0.4,
-            summary=headline.strip()[:500],
-            extracted=extracted,
-            provider=self.name,
-            model="keyword-v1",
-        )

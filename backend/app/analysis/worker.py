@@ -6,6 +6,7 @@ import logging
 
 from sqlalchemy import exists, func, select
 
+from app.analysis import pdf_extract
 from app.analysis.event_study import EventStudyOutput, compute_event_study
 from app.analysis.llm.factory import get_provider
 from app.analysis.scoring import score
@@ -121,16 +122,38 @@ def process_one(aid: int) -> None:
             "company_name": company.name if company else None,
             "yahoo_symbol": company.yahoo_symbol if company else None,
             "market_cap_cr": company.market_cap_cr if company else None,
+            "adv_cr": company.adv_cr if company else None,
             "company_matched": company is not None,
             "announced_at": ann.announced_at,
+            "attachment_url": ann.attachment_url,
+            "attachment_text": ann.attachment_text,
+            "attachment_fetched": ann.attachment_fetched,
         }
 
+    # Phase 1.5: fetch + cache the PDF attachment text (network, no open txn).
+    attachment_text = snap["attachment_text"]
+    if not snap["attachment_fetched"] and snap["attachment_url"]:
+        attachment_text = pdf_extract.fetch_pdf_text(snap["attachment_url"])
+        with session_scope() as session:
+            ann = session.get(RawAnnouncement, aid)
+            if ann is not None:
+                ann.attachment_text = attachment_text
+                ann.attachment_fetched = True
+
     # Phase 2: compute (no open transaction during network calls).
-    llm = provider().analyze(snap["headline"], snap["body"], snap["company_name"])
+    llm = provider().analyze(
+        snap["headline"],
+        snap["body"],
+        snap["company_name"],
+        attachment_text,
+        market_cap_cr=snap["market_cap_cr"],
+        adv_cr=snap["adv_cr"],
+    )
     es = _event_study_for(snap["yahoo_symbol"], snap["announced_at"])
     result = score(
         llm=llm,
         market_cap_cr=snap["market_cap_cr"],
+        adv_cr=snap["adv_cr"],
         company_matched=snap["company_matched"],
         event_study=es,
         announced_at=snap["announced_at"],

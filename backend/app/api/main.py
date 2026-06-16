@@ -28,6 +28,8 @@ from app.db.models import (
     EventStudyResult,
     RawAnnouncement,
 )
+from app.analysis.llm.factory import llm_status
+from app.fundamentals import marketcap
 from app.ingestion.ingest import backfill_company
 from app.sources import bse_master
 
@@ -61,7 +63,21 @@ def _company_out(c: Company | None) -> CompanyOut | None:
         nse_symbol=c.nse_symbol,
         sector=c.sector,
         market_cap_cr=c.market_cap_cr,
+        adv_cr=c.adv_cr,
+        chart_url=_chart_url(c),
     )
+
+
+def _chart_url(c: Company | None) -> str | None:
+    if c is None:
+        return None
+    if c.yahoo_symbol:
+        return f"https://finance.yahoo.com/chart/{c.yahoo_symbol}"
+    if c.nse_symbol:
+        return f"https://finance.yahoo.com/chart/{c.nse_symbol}.NS"
+    if c.bse_scrip_code:
+        return f"https://finance.yahoo.com/chart/{c.bse_scrip_code}.BO"
+    return None
 
 
 @app.get("/api/feed", response_model=FeedResponse)
@@ -74,6 +90,7 @@ def feed(
     sector: str | None = None,
     direction: str | None = None,
     company_id: int | None = None,
+    sort_by: str = Query("score", pattern="^(score|recency)$"),
     days: int = Query(7, ge=1, le=90),
 ) -> FeedResponse:
     since = dt.datetime.now() - dt.timedelta(days=days)
@@ -98,11 +115,17 @@ def feed(
     count_stmt = select(func.count()).select_from(base.subquery())
     total = db.scalar(count_stmt) or 0
 
-    rows = db.execute(
-        base.order_by(
+    order = (
+        (RawAnnouncement.announced_at.desc().nullslast(), AnnouncementAnalysis.composite_score.desc())
+        if sort_by == "recency"
+        else (
             AnnouncementAnalysis.composite_score.desc(),
             RawAnnouncement.announced_at.desc().nullslast(),
         )
+    )
+
+    rows = db.execute(
+        base.order_by(*order)
         .limit(limit)
         .offset(offset)
     ).all()
@@ -214,6 +237,7 @@ def list_companies(
             nse_symbol=c.nse_symbol,
             sector=c.sector,
             market_cap_cr=c.market_cap_cr,
+            adv_cr=c.adv_cr,
             active=c.active,
             announcement_count=int(total_counts.get(c.id, 0)),
             analyzed_count=int(analyzed_counts.get(c.id, 0)),
@@ -255,6 +279,13 @@ def add_company(payload: AddCompanyRequest, db: Session = Depends(get_db)) -> Co
     except Exception:  # noqa: BLE001
         backfill = None
 
+    # Best-effort market-cap fetch so materiality/liquidity work immediately.
+    try:
+        marketcap.refresh_company(company.id)
+        db.refresh(company)
+    except Exception:  # noqa: BLE001
+        pass
+
     ann_count = (
         db.scalar(
             select(func.count())
@@ -279,6 +310,7 @@ def add_company(payload: AddCompanyRequest, db: Session = Depends(get_db)) -> Co
         nse_symbol=company.nse_symbol,
         sector=company.sector,
         market_cap_cr=company.market_cap_cr,
+        adv_cr=company.adv_cr,
         active=company.active,
         announcement_count=ann_count,
         analyzed_count=analyzed_count,
@@ -318,6 +350,7 @@ def delete_company(
 
 @app.get("/api/stats", response_model=StatsResponse)
 def stats(db: Session = Depends(get_db)) -> StatsResponse:
+    llm = llm_status()
     return StatsResponse(
         companies=db.scalar(
             select(func.count()).select_from(Company).where(Company.active.is_(True))
@@ -331,6 +364,15 @@ def stats(db: Session = Depends(get_db)) -> StatsResponse:
             .where(RawAnnouncement.analysis_status == AnalysisStatus.pending)
         )
         or 0,
+        errors=db.scalar(
+            select(func.count())
+            .select_from(RawAnnouncement)
+            .where(RawAnnouncement.analysis_status == AnalysisStatus.error)
+        )
+        or 0,
+        llm_configured=bool(llm["configured"]),
+        llm_provider=llm["provider"],
+        llm_error=llm["error"],
         last_announcement_at=db.scalar(select(func.max(RawAnnouncement.announced_at))),
     )
 

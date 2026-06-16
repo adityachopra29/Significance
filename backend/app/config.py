@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://aie:aie@127.0.0.1:5433/aie"
 
     # LLM (provider-agnostic)
-    llm_provider: str = "heuristic"  # heuristic | openai | anthropic | gemini
+    llm_provider: str = ""  # openai | anthropic | gemini
     llm_model: str = ""
     llm_api_key: str = ""
 

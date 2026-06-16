@@ -42,6 +42,8 @@ class Company(Base):
     sector: Mapped[str | None] = mapped_column(String(128), nullable=True)
     industry: Mapped[str | None] = mapped_column(String(128), nullable=True)
     market_cap_cr: Mapped[float | None] = mapped_column(Float, nullable=True)  # in INR crore
+    shares_outstanding: Mapped[float | None] = mapped_column(Float, nullable=True)  # absolute share count
+    market_cap_asof: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     free_float: Mapped[float | None] = mapped_column(Float, nullable=True)
     adv_cr: Mapped[float | None] = mapped_column(Float, nullable=True)  # avg daily traded value, crore
     fno_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -68,6 +70,8 @@ class RawAnnouncement(Base):
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
     subcategory: Mapped[str | None] = mapped_column(String(128), nullable=True)
     attachment_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attachment_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # extracted PDF body
+    attachment_fetched: Mapped[bool] = mapped_column(Boolean, default=False)  # PDF fetch attempted
 
     announced_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
     fetched_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

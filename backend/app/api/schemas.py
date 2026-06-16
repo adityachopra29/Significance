@@ -13,6 +13,8 @@ class CompanyOut(BaseModel):
     nse_symbol: str | None = None
     sector: str | None = None
     market_cap_cr: float | None = None
+    adv_cr: float | None = None
+    chart_url: str | None = None
 
 
 class CompanyAdmin(BaseModel):
@@ -22,6 +24,7 @@ class CompanyAdmin(BaseModel):
     nse_symbol: str | None = None
     sector: str | None = None
     market_cap_cr: float | None = None
+    adv_cr: float | None = None
     active: bool = True
     announcement_count: int = 0
     analyzed_count: int = 0
@@ -89,4 +92,8 @@ class StatsResponse(BaseModel):
     announcements_total: int
     analyzed: int
     pending: int
+    errors: int = 0
+    llm_configured: bool = True
+    llm_provider: str | None = None
+    llm_error: str | None = None
     last_announcement_at: dt.datetime | None = None

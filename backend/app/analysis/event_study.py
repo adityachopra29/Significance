@@ -33,7 +33,7 @@ class EventStudyOutput:
 
 
 def _returns(series: pd.Series) -> pd.Series:
-    return series.astype(float).pct_change().dropna()
+    return series.astype(float).pct_change(fill_method=None).dropna()
 
 
 def compute_event_study(

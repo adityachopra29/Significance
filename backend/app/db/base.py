@@ -1,13 +1,16 @@
 """SQLAlchemy engine, session factory, and declarative base."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 engine = create_engine(
     settings.database_url,
@@ -45,8 +48,30 @@ def get_db() -> Iterator[Session]:
         session.close()
 
 
+# Idempotent column additions for tables that predate a model change.
+# (create_all only creates missing tables, never alters existing ones.)
+_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("raw_announcements", "attachment_text", "TEXT"),
+    ("raw_announcements", "attachment_fetched", "BOOLEAN DEFAULT FALSE"),
+    ("companies", "shares_outstanding", "DOUBLE PRECISION"),
+    ("companies", "market_cap_asof", "DATE"),
+]
+
+
+def _run_column_migrations() -> None:
+    with engine.begin() as conn:
+        for table, column, coltype in _COLUMN_MIGRATIONS:
+            conn.execute(
+                text(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}')
+            )
+
+
 def init_db() -> None:
-    """Create all tables. Models are imported for side-effects."""
+    """Create all tables, then apply idempotent column migrations."""
     from app.db import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    try:
+        _run_column_migrations()
+    except Exception:  # noqa: BLE001
+        logger.exception("Column migration failed")

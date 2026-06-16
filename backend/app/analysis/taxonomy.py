@@ -1,12 +1,10 @@
-"""Announcement taxonomy: canonical event types, their base weights, and a
-keyword-based classifier + naive sentiment used by the heuristic LLM fallback.
-"""
+"""Announcement taxonomy: canonical event types and their base weights."""
 from __future__ import annotations
 
 import re
 
 # Base materiality weight per canonical event type (0..1), calibrated initially
-# by heuristic and later refined from historical |CAR| in the backtest loop.
+# by judgment and later refined from historical |CAR| in the backtest loop.
 EVENT_TYPE_WEIGHTS: dict[str, float] = {
     "acquisition": 1.0,
     "merger": 0.95,

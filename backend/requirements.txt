@@ -18,6 +18,9 @@ yfinance==1.4.1
 pandas==2.2.3
 numpy==2.2.1
 
+# PDF parsing (announcement attachments)
+pypdf==5.1.0
+
 # Scheduling (poller + worker loops)
 APScheduler==3.11.0
 
