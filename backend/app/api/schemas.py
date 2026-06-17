@@ -9,7 +9,7 @@ from pydantic import BaseModel
 class CompanyOut(BaseModel):
     id: int
     name: str
-    bse_scrip_code: str
+    bse_scrip_code: str | None = None
     nse_symbol: str | None = None
     sector: str | None = None
     market_cap_cr: float | None = None
@@ -20,7 +20,7 @@ class CompanyOut(BaseModel):
 class CompanyAdmin(BaseModel):
     id: int
     name: str
-    bse_scrip_code: str
+    bse_scrip_code: str | None = None
     nse_symbol: str | None = None
     sector: str | None = None
     market_cap_cr: float | None = None

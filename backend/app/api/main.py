@@ -226,26 +226,50 @@ def add_company(payload: AddCompanyRequest, db: Session = Depends(get_db)) -> Co
     if not payload.scrip_code and not payload.nse_symbol:
         raise HTTPException(status_code=400, detail="Provide scrip_code or nse_symbol")
 
-    try:
-        rec = bse_master.lookup(scrip_code=payload.scrip_code, symbol=payload.nse_symbol)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"BSE master lookup failed: {exc}") from exc
-    if rec is None:
-        raise HTTPException(status_code=404, detail="Stock not found on BSE (check scrip code / symbol)")
+    rec = None
+    if payload.scrip_code or payload.nse_symbol:
+        try:
+            rec = bse_master.lookup(scrip_code=payload.scrip_code, symbol=payload.nse_symbol)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"BSE master lookup failed: {exc}") from exc
 
-    scrip = rec["scrip_code"]
-    symbol = payload.nse_symbol or rec.get("symbol")
-    company = db.scalar(select(Company).where(Company.bse_scrip_code == scrip))
-    if company is None:
-        company = Company(bse_scrip_code=scrip)
-        db.add(company)
-    company.name = rec["name"]
-    company.isin = rec.get("isin")
-    company.nse_symbol = symbol
-    company.yahoo_symbol = f"{symbol}.NS" if symbol else None
-    company.sector = company.sector or rec.get("industry")
-    company.ingest_enabled = True
-    company.active = True
+    if rec is None and payload.nse_symbol:
+        from app.scripts.load_universe import lookup_nse_symbol
+
+        nse_rec = lookup_nse_symbol(payload.nse_symbol)
+        if nse_rec is None:
+            raise HTTPException(status_code=404, detail="Stock not found on NSE EQUITY_L")
+        symbol = nse_rec["symbol"]
+        company = db.scalar(select(Company).where(Company.nse_symbol == symbol))
+        if company is None:
+            company = Company(nse_symbol=symbol, name=nse_rec["name"])
+            db.add(company)
+        company.name = nse_rec["name"]
+        company.isin = nse_rec.get("isin")
+        company.nse_symbol = symbol
+        company.yahoo_symbol = f"{symbol}.NS"
+        company.ingest_enabled = True
+        company.active = True
+    elif rec is None:
+        raise HTTPException(status_code=404, detail="Stock not found on BSE (check scrip code / symbol)")
+    else:
+        scrip = rec["scrip_code"]
+        symbol = payload.nse_symbol or rec.get("symbol")
+        company = db.scalar(select(Company).where(Company.bse_scrip_code == scrip))
+        if company is None and symbol:
+            company = db.scalar(select(Company).where(Company.nse_symbol == symbol))
+        if company is None:
+            company = Company(bse_scrip_code=scrip)
+            db.add(company)
+        company.name = rec["name"]
+        company.bse_scrip_code = scrip
+        company.isin = rec.get("isin")
+        company.nse_symbol = symbol
+        company.yahoo_symbol = f"{symbol}.NS" if symbol else None
+        company.sector = company.sector or rec.get("industry")
+        company.ingest_enabled = True
+        company.active = True
+
     db.commit()
     db.refresh(company)
 

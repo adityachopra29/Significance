@@ -2,7 +2,7 @@
 
 Modes:
   nifty500  — Nifty 500 via NSE CSV + BSE ISIN map (legacy default)
-  merged    — full BSE equity master enriched with NSE EQUITY_L symbols
+  merged    — full BSE equity master + NSE EQUITY_L symbols + NSE-only listings
 
 Usage:
     python -m app.scripts.load_universe
@@ -33,27 +33,62 @@ def _fetch_nifty500() -> list[dict]:
     return list(csv.DictReader(io.StringIO(r.text)))
 
 
-def _fetch_nse_equity() -> dict[str, dict]:
+def _fetch_nse_equity() -> tuple[dict[str, dict], dict[str, dict]]:
+    """Return (by_isin, by_symbol) for NSE EQ series."""
     r = httpx.get(NSE_EQUITY_CSV, headers={"User-Agent": HEADERS["User-Agent"]}, timeout=60, follow_redirects=True)
     r.raise_for_status()
     by_isin: dict[str, dict] = {}
+    by_symbol: dict[str, dict] = {}
     for row in csv.DictReader(io.StringIO(r.text)):
         series = (row.get(" SERIES") or row.get("SERIES") or "").strip()
         if series != "EQ":
             continue
         isin = (row.get(" ISIN NUMBER") or row.get("ISIN NUMBER") or "").strip()
-        symbol = (row.get("SYMBOL") or "").strip()
+        symbol = (row.get("SYMBOL") or "").strip().upper()
         name = (row.get("NAME OF COMPANY") or "").strip()
+        if not symbol:
+            continue
+        rec = {"symbol": symbol, "name": name, "isin": isin or None}
+        by_symbol[symbol] = rec
         if isin:
-            by_isin[isin] = {"symbol": symbol, "name": name}
-    return by_isin
+            by_isin[isin] = rec
+    return by_isin, by_symbol
 
 
-def _upsert_company(session, scrip: str, *, name: str, isin: str | None, nse_symbol: str | None, sector: str | None):
-    company = session.scalar(select(Company).where(Company.bse_scrip_code == scrip))
+def _find_company(session, *, scrip: str | None = None, nse_symbol: str | None = None, isin: str | None = None):
+    if scrip:
+        company = session.scalar(select(Company).where(Company.bse_scrip_code == scrip))
+        if company is not None:
+            return company
+    if nse_symbol:
+        company = session.scalar(select(Company).where(Company.nse_symbol == nse_symbol.upper()))
+        if company is not None:
+            return company
+    if isin:
+        return session.scalar(select(Company).where(Company.isin == isin))
+    return None
+
+
+def _upsert_company(
+    session,
+    *,
+    scrip: str | None,
+    name: str,
+    isin: str | None,
+    nse_symbol: str | None,
+    sector: str | None,
+) -> Company:
+    nse_symbol = nse_symbol.upper() if nse_symbol else None
+    company = _find_company(session, scrip=scrip, nse_symbol=nse_symbol, isin=isin)
     if company is None:
-        company = Company(bse_scrip_code=scrip)
+        company = Company(
+            bse_scrip_code=scrip,
+            nse_symbol=nse_symbol,
+            name=name or nse_symbol or scrip or "Unknown",
+        )
         session.add(company)
+    if scrip:
+        company.bse_scrip_code = scrip
     company.name = name or company.name
     company.isin = isin or company.isin
     if nse_symbol:
@@ -86,7 +121,7 @@ def load_nifty500(enrich: bool = False) -> dict:
                 continue
             _upsert_company(
                 session,
-                rec["scrip_code"],
+                scrip=rec["scrip_code"],
                 name=name or rec["name"],
                 isin=isin or rec.get("isin"),
                 nse_symbol=symbol or rec.get("symbol"),
@@ -105,8 +140,11 @@ def load_nifty500(enrich: bool = False) -> dict:
 def load_merged(enrich: bool = False) -> dict:
     init_db()
     master = get_master()
-    nse_by_isin = _fetch_nse_equity()
-    matched = 0
+    nse_by_isin, nse_by_symbol = _fetch_nse_equity()
+    bse_matched = 0
+    nse_only = 0
+
+    bse_isins = set(master["by_isin"].keys())
 
     with session_scope() as session:
         for rec in master["by_scrip"].values():
@@ -118,20 +156,45 @@ def load_merged(enrich: bool = False) -> dict:
                 name = nse["name"]
             _upsert_company(
                 session,
-                rec["scrip_code"],
+                scrip=rec["scrip_code"],
                 name=name,
                 isin=isin,
                 nse_symbol=nse_symbol,
                 sector=rec.get("industry"),
             )
-            matched += 1
+            bse_matched += 1
+
+        for isin, nse in nse_by_isin.items():
+            if isin in bse_isins:
+                continue
+            _upsert_company(
+                session,
+                scrip=None,
+                name=nse["name"],
+                isin=isin,
+                nse_symbol=nse["symbol"],
+                sector=None,
+            )
+            nse_only += 1
 
     if enrich:
         from app.scripts.load_companies import _enrich_market_caps
 
         _enrich_market_caps()
 
-    return {"mode": "merged", "matched": matched, "nse_isin_map": len(nse_by_isin)}
+    return {
+        "mode": "merged",
+        "bse_matched": bse_matched,
+        "nse_only": nse_only,
+        "nse_equity_total": len(nse_by_symbol),
+        "nse_isin_map": len(nse_by_isin),
+    }
+
+
+def lookup_nse_symbol(symbol: str) -> dict | None:
+    """Resolve a symbol from NSE EQUITY_L (for NSE-only watchlist adds)."""
+    _, by_symbol = _fetch_nse_equity()
+    return by_symbol.get(symbol.upper())
 
 
 def load_universe(mode: str = "nifty500", enrich: bool = False) -> dict:
