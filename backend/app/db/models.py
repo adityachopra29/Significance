@@ -35,8 +35,8 @@ class Company(Base):
     __tablename__ = "companies"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    bse_scrip_code: Mapped[str] = mapped_column(String(16), unique=True, index=True)
-    nse_symbol: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
+    bse_scrip_code: Mapped[str | None] = mapped_column(String(16), unique=True, index=True, nullable=True)
+    nse_symbol: Mapped[str | None] = mapped_column(String(32), unique=True, index=True, nullable=True)
     yahoo_symbol: Mapped[str | None] = mapped_column(String(40), nullable=True)
     isin: Mapped[str | None] = mapped_column(String(16), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String(256))
@@ -63,8 +63,10 @@ class RawAnnouncement(Base):
     source: Mapped[str] = mapped_column(String(16), index=True)  # e.g. "bse"
     external_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    exchange_dedup_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
 
     bse_scrip_code: Mapped[str | None] = mapped_column(String(16), index=True, nullable=True)
+    nse_symbol: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"), nullable=True, index=True)
 
     headline: Mapped[str] = mapped_column(Text)

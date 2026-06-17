@@ -68,12 +68,23 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("raw_announcements", "category_rank", "INTEGER"),
     ("raw_announcements", "skip_reason", "VARCHAR(64)"),
     ("raw_announcements", "triage_reason", "VARCHAR(64)"),
+    ("raw_announcements", "nse_symbol", "VARCHAR(32)"),
+    ("raw_announcements", "exchange_dedup_hash", "VARCHAR(64)"),
 ]
 
 
 def _run_enum_migrations() -> None:
     with engine.begin() as conn:
         conn.execute(text("ALTER TYPE analysis_status ADD VALUE IF NOT EXISTS 'skipped'"))
+
+
+def _run_column_migrations() -> None:
+    with engine.begin() as conn:
+        for table, column, coltype in _COLUMN_MIGRATIONS:
+            conn.execute(
+                text(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}')
+            )
+        conn.execute(text("ALTER TABLE companies ALTER COLUMN bse_scrip_code DROP NOT NULL"))
 
 
 def _backfill_triage_defaults() -> None:
@@ -94,14 +105,6 @@ def _backfill_triage_defaults() -> None:
                 """
             )
         )
-
-
-def _run_column_migrations() -> None:
-    with engine.begin() as conn:
-        for table, column, coltype in _COLUMN_MIGRATIONS:
-            conn.execute(
-                text(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}')
-            )
 
 
 def init_db() -> None:

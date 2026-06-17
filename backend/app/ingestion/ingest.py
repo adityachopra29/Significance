@@ -1,8 +1,8 @@
 """Ingestion: pull from sources, dedup, map to companies, persist as raw_announcements.
 
-Announcements are deduplicated by content_hash (source + BSE NEWSID). Once analyzed,
-rows stay in the DB with analysis_status=done — backfills and re-adding companies
-only insert genuinely new filings; existing ones are skipped (no re-analysis).
+Announcements are deduplicated by content_hash (source + external id). NSE rows
+that match an existing BSE filing for the same company within a short time window
+are skipped to avoid double analysis on dual-listed names.
 """
 from __future__ import annotations
 
@@ -20,22 +20,26 @@ from app.db.base import session_scope
 from app.db.models import AnalysisStatus, Company, RawAnnouncement
 from app.sources.base import RawAnnouncementDTO, Source
 from app.sources.bse import BSEAnnouncementsSource
+from app.sources.nse import NSEAnnouncementsSource
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
+from app.ingestion.dedup import CROSS_EXCHANGE_TIME_WINDOW, exchange_dedup_hash
 class BackfillResult:
     inserted: int = 0
     skipped: int = 0  # already in DB (analysis preserved)
+    cross_skipped: int = 0  # NSE dup of existing BSE row
 
     @property
     def fetched(self) -> int:
-        return self.inserted + self.skipped
+        return self.inserted + self.skipped + self.cross_skipped
 
 
 def default_sources() -> list[Source]:
-    return [BSEAnnouncementsSource(max_pages=3)]
+    sources: list[Source] = [BSEAnnouncementsSource(max_pages=3)]
+    if settings.nse_ingest_enabled:
+        sources.append(NSEAnnouncementsSource())
+    return sources
 
 
 def _since(session) -> dt.datetime:
@@ -45,12 +49,35 @@ def _since(session) -> dt.datetime:
     return dt.datetime.now() - dt.timedelta(days=settings.backfill_days)
 
 
-def _company_index(session) -> dict[str, int]:
-    """Map ingested universe BSE scrip codes -> company id."""
+def _company_indexes(session) -> tuple[dict[str, int], dict[str, int]]:
+    """Return (bse_scrip_code -> id, nse_symbol -> id) for ingest_enabled companies."""
+    bse_idx: dict[str, int] = {}
+    nse_idx: dict[str, int] = {}
     rows = session.execute(
-        select(Company.bse_scrip_code, Company.id).where(Company.ingest_enabled.is_(True))
+        select(Company.bse_scrip_code, Company.nse_symbol, Company.id).where(
+            Company.ingest_enabled.is_(True)
+        )
     ).all()
-    return {str(code): cid for code, cid in rows if code}
+    for bse_code, nse_sym, cid in rows:
+        if bse_code:
+            bse_idx[str(bse_code)] = cid
+        if nse_sym:
+            nse_idx[str(nse_sym).upper()] = cid
+    return bse_idx, nse_idx
+
+
+def _resolve_company_id(
+    dto: RawAnnouncementDTO,
+    bse_idx: dict[str, int],
+    nse_idx: dict[str, int],
+) -> int | None:
+    if dto.bse_scrip_code:
+        cid = bse_idx.get(str(dto.bse_scrip_code))
+        if cid is not None:
+            return cid
+    if dto.nse_symbol:
+        return nse_idx.get(str(dto.nse_symbol).upper())
+    return None
 
 
 def _apply_triage(dto: RawAnnouncementDTO) -> dict:
@@ -87,12 +114,13 @@ def run_ingestion(sources: list[Source] | None = None) -> dict:
     sources = sources or default_sources()
     inserted = 0
     seen = 0
+    cross_skipped = 0
     new_ids: list[int] = []
 
     with session_scope() as session:
         since = _since(session)
-        company_idx = _company_index(session)
-        universe_only = bool(company_idx)
+        bse_idx, nse_idx = _company_indexes(session)
+        universe_only = bool(bse_idx or nse_idx)
 
         for src in sources:
             try:
@@ -103,19 +131,26 @@ def run_ingestion(sources: list[Source] | None = None) -> dict:
 
             for dto in dtos:
                 seen += 1
-                company_id = company_idx.get(str(dto.bse_scrip_code)) if dto.bse_scrip_code else None
+                company_id = _resolve_company_id(dto, bse_idx, nse_idx)
                 if universe_only and company_id is None:
                     continue
-                ann_id = _insert_if_new(session, dto, company_id)
-                if ann_id:
+                ann_id, cross = _insert_if_new(session, dto, company_id)
+                if cross:
+                    cross_skipped += 1
+                elif ann_id:
                     inserted += 1
                     new_ids.append(ann_id)
 
     for ann_id in new_ids:
         _emit_triaged(ann_id)
 
-    logger.info("Ingestion: %d seen, %d inserted", seen, inserted)
-    return {"seen": seen, "inserted": inserted}
+    logger.info(
+        "Ingestion: %d seen, %d inserted, %d cross-exchange skipped",
+        seen,
+        inserted,
+        cross_skipped,
+    )
+    return {"seen": seen, "inserted": inserted, "cross_skipped": cross_skipped}
 
 
 def _emit_triaged(ann_id: int) -> None:
@@ -138,6 +173,64 @@ def _emit_triaged(ann_id: int) -> None:
 
 def backfill_universe(days: int | None = None) -> dict:
     days = days or settings.backfill_days
+    out: dict = {"days": days}
+
+    if settings.nse_ingest_enabled:
+        out["nse"] = backfill_nse_days(days)
+
+    out["bse"] = backfill_bse_universe(days)
+    return out
+
+
+def backfill_nse_days(days: int | None = None) -> dict:
+    """Backfill NSE announcements by calendar day (one API call per day)."""
+    days = days or settings.backfill_days
+    src = NSEAnnouncementsSource()
+    today = dt.date.today()
+    from_date = today - dt.timedelta(days=days)
+
+    total = BackfillResult()
+    new_ids: list[int] = []
+    client = src.warmed_client()
+    try:
+        with session_scope() as session:
+            bse_idx, nse_idx = _company_indexes(session)
+        dtos = src.fetch_range(from_date, today, client=client)
+        with session_scope() as session:
+            for dto in dtos:
+                company_id = _resolve_company_id(dto, bse_idx, nse_idx)
+                if company_id is None:
+                    continue
+                ann_id, cross = _insert_if_new(session, dto, company_id)
+                if cross:
+                    total.cross_skipped += 1
+                elif ann_id:
+                    total.inserted += 1
+                    new_ids.append(ann_id)
+                else:
+                    total.skipped += 1
+    finally:
+        client.close()
+
+    for ann_id in new_ids:
+        _emit_triaged(ann_id)
+
+    logger.info(
+        "NSE backfill %d days: %d new, %d cached, %d cross-skipped",
+        days,
+        total.inserted,
+        total.skipped,
+        total.cross_skipped,
+    )
+    return {
+        "inserted": total.inserted,
+        "skipped": total.skipped,
+        "cross_skipped": total.cross_skipped,
+    }
+
+
+def backfill_bse_universe(days: int | None = None) -> dict:
+    days = days or settings.backfill_days
 
     with session_scope() as session:
         companies = session.execute(
@@ -156,10 +249,10 @@ def backfill_universe(days: int | None = None) -> dict:
                 total.inserted += result.inserted
                 total.skipped += result.skipped
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Backfill failed for scrip %s: %s", scrip, exc)
+                logger.warning("BSE backfill failed for scrip %s: %s", scrip, exc)
             if idx % 100 == 0:
                 logger.info(
-                    "Backfill progress: %d/%d companies, %d new, %d cached",
+                    "BSE backfill progress: %d/%d companies, %d new, %d cached",
                     idx,
                     len(companies),
                     total.inserted,
@@ -168,7 +261,7 @@ def backfill_universe(days: int | None = None) -> dict:
     finally:
         client.close()
     logger.info(
-        "Backfill universe: %d companies, %d new, %d cached",
+        "BSE backfill: %d companies, %d new, %d cached",
         len(companies),
         total.inserted,
         total.skipped,
@@ -182,15 +275,37 @@ def backfill_universe(days: int | None = None) -> dict:
 
 def backfill_company(company_id: int, days: int | None = None) -> BackfillResult:
     days = days or settings.backfill_days
-    src = BSEAnnouncementsSource()
+    total = BackfillResult()
 
     with session_scope() as session:
         company = session.get(Company, company_id)
-        if company is None or not company.bse_scrip_code:
-            return BackfillResult()
-        scrip = company.bse_scrip_code
+        if company is None:
+            return total
 
-    return _backfill_one_scrip(src, company_id, str(scrip), days)
+    if company.bse_scrip_code:
+        bse = _backfill_one_scrip(BSEAnnouncementsSource(), company_id, str(company.bse_scrip_code), days)
+        total.inserted += bse.inserted
+        total.skipped += bse.skipped
+
+    if settings.nse_ingest_enabled and company.nse_symbol:
+        nse_src = NSEAnnouncementsSource()
+        since = dt.datetime.now() - dt.timedelta(days=days)
+        dtos = nse_src.fetch_symbol(company.nse_symbol, since=since)
+        new_ids: list[int] = []
+        with session_scope() as session:
+            for dto in dtos:
+                ann_id, cross = _insert_if_new(session, dto, company_id)
+                if cross:
+                    total.cross_skipped += 1
+                elif ann_id:
+                    total.inserted += 1
+                    new_ids.append(ann_id)
+                else:
+                    total.skipped += 1
+        for ann_id in new_ids:
+            _emit_triaged(ann_id)
+
+    return total
 
 
 def _backfill_one_scrip(
@@ -208,8 +323,10 @@ def _backfill_one_scrip(
     new_ids: list[int] = []
     with session_scope() as session:
         for dto in dtos:
-            ann_id = _insert_if_new(session, dto, company_id)
-            if ann_id:
+            ann_id, cross = _insert_if_new(session, dto, company_id)
+            if cross:
+                result.cross_skipped += 1
+            elif ann_id:
                 result.inserted += 1
                 new_ids.append(ann_id)
             else:
@@ -247,7 +364,78 @@ def _backfill_since(session, company_id: int, scrip: str, days: int) -> dt.datet
     return earliest_needed.replace(tzinfo=None)
 
 
-def _insert_if_new(session, dto: RawAnnouncementDTO, company_id: int | None) -> int | None:
+def _find_exchange_duplicate(
+    session,
+    company_id: int | None,
+    announced_at: dt.datetime | None,
+    headline: str | None,
+    *,
+    subcategory: str | None = None,
+    exclude_source: str | None = None,
+) -> RawAnnouncement | None:
+    """Find an existing row for the same filing on the other exchange."""
+    if company_id is None:
+        return None
+
+    ex_hash = exchange_dedup_hash(company_id, announced_at, headline, subcategory=subcategory)
+    if ex_hash:
+        row = session.scalar(
+            select(RawAnnouncement).where(RawAnnouncement.exchange_dedup_hash == ex_hash).limit(1)
+        )
+        if row is not None and row.source != exclude_source:
+            return row
+
+    if announced_at is None:
+        return None
+    at = announced_at.replace(tzinfo=None) if announced_at.tzinfo else announced_at
+    lo = at - CROSS_EXCHANGE_TIME_WINDOW
+    hi = at + CROSS_EXCHANGE_TIME_WINDOW
+    stmt = (
+        select(RawAnnouncement)
+        .where(
+            RawAnnouncement.company_id == company_id,
+            RawAnnouncement.announced_at >= lo,
+            RawAnnouncement.announced_at <= hi,
+        )
+        .limit(1)
+    )
+    if exclude_source:
+        stmt = stmt.where(RawAnnouncement.source != exclude_source)
+    return session.scalar(stmt)
+
+
+def _merge_announcement_fields(existing: RawAnnouncement, dto: RawAnnouncementDTO) -> None:
+    """Enrich an existing row with fields from the other exchange."""
+    if dto.bse_scrip_code and not existing.bse_scrip_code:
+        existing.bse_scrip_code = dto.bse_scrip_code
+    if dto.nse_symbol and not existing.nse_symbol:
+        existing.nse_symbol = dto.nse_symbol
+    if dto.attachment_url and not existing.attachment_url:
+        existing.attachment_url = dto.attachment_url
+    if dto.body and (not existing.body or len(dto.body) > len(existing.body or "")):
+        existing.body = dto.body
+    if dto.external_id and not existing.external_id:
+        existing.external_id = dto.external_id
+
+
+def _insert_if_new(
+    session,
+    dto: RawAnnouncementDTO,
+    company_id: int | None,
+) -> tuple[int | None, bool]:
+    """Insert if new. Returns (ann_id, cross_exchange_skipped)."""
+    duplicate = _find_exchange_duplicate(
+        session,
+        company_id,
+        dto.announced_at,
+        dto.headline,
+        subcategory=dto.subcategory,
+        exclude_source=dto.source,
+    )
+    if duplicate is not None:
+        _merge_announcement_fields(duplicate, dto)
+        return None, True
+
     chash = dto.content_hash()
     existing = session.scalar(
         select(RawAnnouncement).where(RawAnnouncement.content_hash == chash)
@@ -255,16 +443,18 @@ def _insert_if_new(session, dto: RawAnnouncementDTO, company_id: int | None) -> 
     if existing is not None:
         if company_id and existing.company_id != company_id:
             existing.company_id = company_id
-        if dto.bse_scrip_code and not existing.bse_scrip_code:
-            existing.bse_scrip_code = dto.bse_scrip_code
-        return None
+        _merge_announcement_fields(existing, dto)
+        return None, False
 
+    ex_hash = exchange_dedup_hash(company_id, dto.announced_at, dto.headline, subcategory=dto.subcategory)
     triage_fields = _apply_triage(dto)
     ann = RawAnnouncement(
         source=dto.source,
         external_id=dto.external_id,
         content_hash=chash,
+        exchange_dedup_hash=ex_hash,
         bse_scrip_code=dto.bse_scrip_code,
+        nse_symbol=dto.nse_symbol,
         company_id=company_id,
         headline=dto.headline,
         body=dto.body,
@@ -277,4 +467,4 @@ def _insert_if_new(session, dto: RawAnnouncementDTO, company_id: int | None) -> 
     )
     session.add(ann)
     session.flush()
-    return ann.id
+    return ann.id, False
