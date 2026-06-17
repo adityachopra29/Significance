@@ -79,28 +79,45 @@ export default function DetailDrawer({
         {detail && (
           <>
             <div className="detail-score-row">
-              <div
-                className="score"
-                style={{ color: scoreColor(detail.composite_score) }}
-              >
-                {detail.composite_score?.toFixed(0) ?? "-"}
-              </div>
-              <div>
-                <div className="detail-score-label">
-                  Composite score
-                  <InfoTip help={COMPOSITE_SCORE} />
+              {detail.composite_score != null ? (
+                <>
+                  <div
+                    className="score"
+                    style={{ color: scoreColor(detail.composite_score) }}
+                  >
+                    {detail.composite_score.toFixed(0)}
+                  </div>
+                  <div>
+                    <div className="detail-score-label">
+                      Composite score
+                      <InfoTip help={COMPOSITE_SCORE} />
+                    </div>
+                    <h2>{detail.company?.name ?? detail.bse_scrip_code ?? "Unknown"}</h2>
+                  </div>
+                </>
+              ) : (
+                <div>
+                  <div className="detail-score-label">
+                    {detail.triage_tier ? `Tier ${detail.triage_tier}` : "Awaiting analysis"}
+                  </div>
+                  <h2>{detail.company?.name ?? detail.bse_scrip_code ?? "Unknown"}</h2>
                 </div>
-                <h2>{detail.company?.name ?? detail.bse_scrip_code ?? "Unknown"}</h2>
-              </div>
+              )}
             </div>
 
             <div className="card-meta">
               {detail.company?.nse_symbol && <span className="chip">{detail.company.nse_symbol}</span>}
-              {detail.event_type && (
+              {(detail.triage_event_type || detail.event_type) && (
                 <span className="chip chip-with-tip">
-                  {prettyEventType(detail.event_type)}
+                  {prettyEventType(detail.triage_event_type || detail.event_type)}
                   <InfoTip help={EVENT_TYPE} />
                 </span>
+              )}
+              {detail.analysis_status === "pending" && (
+                <span className="chip status-pending">Queued for analysis</span>
+              )}
+              {detail.analysis_status === "processing" && (
+                <span className="chip status-processing">Analyzing…</span>
               )}
               {detail.direction && (
                 <span className={`dir ${detail.direction} chip-with-tip`}>
@@ -118,11 +135,6 @@ export default function DetailDrawer({
               <span>{timeAgo(detail.announced_at)}</span>
             </div>
 
-            <div className="section">
-              <h3>Headline</h3>
-              <div>{detail.headline}</div>
-            </div>
-
             {detail.summary && (
               <div className="section">
                 <h3>AI summary</h3>
@@ -130,6 +142,17 @@ export default function DetailDrawer({
               </div>
             )}
 
+            {!detail.summary && detail.headline && detail.analysis_status !== "done" && (
+              <div className="section">
+                <h3>Headline</h3>
+                <div>{detail.headline}</div>
+                <p className="disclaimer" style={{ marginTop: 12 }}>
+                  Full LLM analysis is pending. Check back shortly or keep this drawer open.
+                </p>
+              </div>
+            )}
+
+            {detail.factors && detail.composite_score != null && (
             <div className="section">
               <h3>
                 Score breakdown
@@ -155,6 +178,14 @@ export default function DetailDrawer({
                 );
               })}
             </div>
+            )}
+
+            {detail.headline && (detail.summary || detail.analysis_status === "done") && (
+            <div className="section">
+              <h3>Headline</h3>
+              <div>{detail.headline}</div>
+            </div>
+            )}
 
             {es && (es.car_t1 != null || es.ar_day0 != null) && (
               <div className="section">

@@ -18,7 +18,7 @@ export default function ManageStocks({
   const [msg, setMsg] = useState<string | null>(null);
 
   const refresh = () => {
-    getCompanies().then(setCompanies).catch((e) => setMsg(String(e)));
+    getCompanies(undefined, true).then(setCompanies).catch((e) => setMsg(String(e)));
   };
 
   useEffect(refresh, []);
