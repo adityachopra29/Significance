@@ -20,6 +20,8 @@ from app.db.models import (
     PriceDaily,
     RawAnnouncement,
 )
+from app.api import events as feed_events
+from app.api.feed_helpers import feed_item_from_row
 from app.prices import yahoo
 
 logger = logging.getLogger(__name__)
@@ -35,16 +37,21 @@ def provider():
     return _provider
 
 
-def process_pending(limit: int = 25) -> int:
+def process_pending(limit: int | None = None) -> int:
     _sync_done_status()
     _recover_stuck_processing()
+    limit = limit or settings.analyze_batch_size
 
     with session_scope() as session:
         ids = list(
             session.scalars(
                 select(RawAnnouncement.id)
                 .where(RawAnnouncement.analysis_status == AnalysisStatus.pending)
-                .order_by(RawAnnouncement.announced_at.desc().nullslast())
+                .where(RawAnnouncement.triage_passed.is_(True))
+                .order_by(
+                    RawAnnouncement.triage_priority.asc().nullslast(),
+                    RawAnnouncement.announced_at.desc().nullslast(),
+                )
                 .limit(limit)
             )
         )
@@ -115,6 +122,8 @@ def process_one(aid: int) -> None:
             ann.analysis_status = AnalysisStatus.done
             return
         ann.analysis_status = AnalysisStatus.processing
+        session.flush()
+        feed_events.publish("analysis_started", {"id": aid})
         company = session.get(Company, ann.company_id) if ann.company_id else None
         snap = {
             "headline": ann.headline,
@@ -213,6 +222,28 @@ def process_one(aid: int) -> None:
             esr.t_stat = es.t_stat
 
         ann.analysis_status = AnalysisStatus.done
+
+    _emit_analysis_done(aid)
+
+
+def _emit_analysis_done(aid: int) -> None:
+    try:
+        with session_scope() as session:
+            row = session.execute(
+                select(RawAnnouncement, AnnouncementAnalysis, Company)
+                .join(AnnouncementAnalysis, AnnouncementAnalysis.announcement_id == RawAnnouncement.id)
+                .outerjoin(Company, Company.id == RawAnnouncement.company_id)
+                .where(RawAnnouncement.id == aid)
+            ).one_or_none()
+            if row is None:
+                return
+            ann, analysis, company = row
+            feed_events.publish(
+                "analysis_done",
+                feed_item_from_row(ann, analysis, company).model_dump(mode="json"),
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to emit analysis_done for %d", aid)
 
 
 def _event_study_for(yahoo_symbol: str | None, announced_at: dt.datetime | None) -> EventStudyOutput | None:

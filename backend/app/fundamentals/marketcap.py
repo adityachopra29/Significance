@@ -154,7 +154,7 @@ def refresh_company(company_id: int, force_shares: bool = False) -> float | None
 def refresh_all(only_missing: bool = False, pause: float = 0.4) -> dict:
     """Refresh market caps for all active companies. Throttled for politeness."""
     with session_scope() as session:
-        stmt = select(Company.id).where(Company.active.is_(True))
+        stmt = select(Company.id).where(Company.ingest_enabled.is_(True))
         if only_missing:
             stmt = stmt.where(Company.market_cap_cr.is_(None))
         ids = list(session.scalars(stmt))
