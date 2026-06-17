@@ -60,7 +60,40 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("announcement_analysis", "llm_confidence", "DOUBLE PRECISION"),
     ("announcement_analysis", "is_routine", "BOOLEAN DEFAULT FALSE"),
     ("announcement_analysis", "analysis_schema_version", "VARCHAR(16)"),
+    ("companies", "ingest_enabled", "BOOLEAN DEFAULT TRUE"),
+    ("raw_announcements", "triage_passed", "BOOLEAN DEFAULT FALSE"),
+    ("raw_announcements", "triage_event_type", "VARCHAR(64)"),
+    ("raw_announcements", "triage_tier", "VARCHAR(4)"),
+    ("raw_announcements", "triage_priority", "INTEGER"),
+    ("raw_announcements", "category_rank", "INTEGER"),
+    ("raw_announcements", "skip_reason", "VARCHAR(64)"),
+    ("raw_announcements", "triage_reason", "VARCHAR(64)"),
 ]
+
+
+def _run_enum_migrations() -> None:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TYPE analysis_status ADD VALUE IF NOT EXISTS 'skipped'"))
+
+
+def _backfill_triage_defaults() -> None:
+    """Existing rows pre-triage: treat analyzed/pending as triage-passed."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE raw_announcements
+                SET triage_passed = TRUE,
+                    triage_event_type = COALESCE(triage_event_type, 'other'),
+                    triage_tier = COALESCE(triage_tier, 'E'),
+                    triage_priority = COALESCE(triage_priority, 300),
+                    category_rank = COALESCE(category_rank, 7000)
+                WHERE triage_passed = FALSE
+                  AND triage_event_type IS NULL
+                  AND analysis_status IN ('pending', 'processing', 'done', 'error')
+                """
+            )
+        )
 
 
 def _run_column_migrations() -> None:
@@ -78,5 +111,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     try:
         _run_column_migrations()
+        _run_enum_migrations()
+        _backfill_triage_defaults()
     except Exception:  # noqa: BLE001
         logger.exception("Column migration failed")

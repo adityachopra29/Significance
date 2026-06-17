@@ -24,6 +24,7 @@ from app.db.base import Base
 
 
 class AnalysisStatus(str, enum.Enum):
+    skipped = "skipped"
     pending = "pending"
     processing = "processing"
     done = "done"
@@ -47,7 +48,8 @@ class Company(Base):
     free_float: Mapped[float | None] = mapped_column(Float, nullable=True)
     adv_cr: Mapped[float | None] = mapped_column(Float, nullable=True)  # avg daily traded value, crore
     fno_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    ingest_enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=False)  # watchlist only
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     announcements: Mapped[list[RawAnnouncement]] = relationship(back_populates="company")
@@ -81,6 +83,13 @@ class RawAnnouncement(Base):
         default=AnalysisStatus.pending,
         index=True,
     )
+    triage_passed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    triage_event_type: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    triage_tier: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    triage_priority: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    category_rank: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    skip_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    triage_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     raw_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     company: Mapped[Company | None] = relationship(back_populates="announcements")

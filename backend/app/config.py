@@ -26,7 +26,14 @@ class Settings(BaseSettings):
 
     # Ingestion
     poll_interval_seconds: int = 60
-    backfill_days: int = 3
+    backfill_days: int = 90
+    retention_days: int = 15
+    feed_max_days: int = 15
+    attachment_retention_days: int = 7
+    purge_enabled: bool = False
+
+    # Worker
+    analyze_batch_size: int = 50
 
     # Event study
     estimation_window_days: int = 120
