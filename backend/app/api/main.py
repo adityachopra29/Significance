@@ -1,20 +1,25 @@
 """FastAPI application: ranked announcement feed + detail + stats."""
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import queue
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from app.api import events as feed_events
+from app.api.feed_helpers import chart_url, company_out, feed_item_from_row
+from app.api.feed_service import query_feed
 from app.api.schemas import (
     AddCompanyRequest,
     CompanyAdmin,
     CompanyOut,
     EventStudyOut,
     Factors,
-    FeedItem,
     FeedItemDetail,
     FeedResponse,
     StatsResponse,
@@ -54,116 +59,85 @@ def health() -> dict:
 
 
 def _company_out(c: Company | None) -> CompanyOut | None:
-    if c is None:
-        return None
-    return CompanyOut(
-        id=c.id,
-        name=c.name,
-        bse_scrip_code=c.bse_scrip_code,
-        nse_symbol=c.nse_symbol,
-        sector=c.sector,
-        market_cap_cr=c.market_cap_cr,
-        adv_cr=c.adv_cr,
-        chart_url=_chart_url(c),
-    )
+    return company_out(c)
 
 
 def _chart_url(c: Company | None) -> str | None:
-    if c is None:
-        return None
-    if c.yahoo_symbol:
-        return f"https://finance.yahoo.com/chart/{c.yahoo_symbol}"
-    if c.nse_symbol:
-        return f"https://finance.yahoo.com/chart/{c.nse_symbol}.NS"
-    if c.bse_scrip_code:
-        return f"https://finance.yahoo.com/chart/{c.bse_scrip_code}.BO"
-    return None
+    return chart_url(c)
 
 
 @app.get("/api/feed", response_model=FeedResponse)
 def feed(
     db: Session = Depends(get_db),
-    limit: int = Query(50, le=200),
-    offset: int = 0,
+    view: str = Query("live", pattern="^(live|ranked)$"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     min_score: float = 0.0,
     event_type: str | None = None,
     sector: str | None = None,
     direction: str | None = None,
     company_id: int | None = None,
-    sort_by: str = Query("score", pattern="^(score|recency)$"),
+    sort_by: str = Query("category", pattern="^(category|score|recency)$"),
     days: int = Query(7, ge=1, le=90),
 ) -> FeedResponse:
-    since = dt.datetime.now() - dt.timedelta(days=days)
-
-    base = (
-        select(RawAnnouncement, AnnouncementAnalysis, Company)
-        .join(AnnouncementAnalysis, AnnouncementAnalysis.announcement_id == RawAnnouncement.id)
-        .join(Company, Company.id == RawAnnouncement.company_id)
-        .where(Company.active.is_(True))
-        .where(AnnouncementAnalysis.composite_score >= min_score)
-        .where(RawAnnouncement.announced_at >= since)
-    )
-    if event_type:
-        base = base.where(AnnouncementAnalysis.event_type == event_type)
-    if direction:
-        base = base.where(AnnouncementAnalysis.direction == direction)
-    if sector:
-        base = base.where(Company.sector == sector)
-    if company_id:
-        base = base.where(Company.id == company_id)
-
-    count_stmt = select(func.count()).select_from(base.subquery())
-    total = db.scalar(count_stmt) or 0
-
-    order = (
-        (RawAnnouncement.announced_at.desc().nullslast(), AnnouncementAnalysis.composite_score.desc())
-        if sort_by == "recency"
-        else (
-            AnnouncementAnalysis.composite_score.desc(),
-            RawAnnouncement.announced_at.desc().nullslast(),
-        )
+    if view == "live" and sort_by == "score":
+        sort_by = "category"
+    if view == "ranked" and sort_by == "category":
+        sort_by = "score"
+    return query_feed(
+        db,
+        view=view,
+        sort_by=sort_by,
+        days=days,
+        limit=limit,
+        offset=offset,
+        min_score=min_score,
+        event_type=event_type,
+        direction=direction,
+        sector=sector,
+        company_id=company_id,
     )
 
-    rows = db.execute(
-        base.order_by(*order)
-        .limit(limit)
-        .offset(offset)
-    ).all()
 
-    items = [
-        FeedItem(
-            id=ann.id,
-            headline=ann.headline,
-            company=_company_out(company),
-            bse_scrip_code=ann.bse_scrip_code,
-            category=ann.category,
-            event_type=analysis.event_type,
-            direction=analysis.direction,
-            sentiment=analysis.sentiment,
-            summary=analysis.summary,
-            composite_score=analysis.composite_score,
-            announced_at=ann.announced_at,
-            attachment_url=ann.attachment_url,
-            model_provider=analysis.model_provider,
-        )
-        for ann, analysis, company in rows
-    ]
-    return FeedResponse(total=total, items=items)
+@app.get("/api/feed/events")
+async def feed_events() -> StreamingResponse:
+    """SSE stream: announcement_triaged, analysis_started, analysis_done."""
+
+    async def stream():
+        q = feed_events.register()
+        try:
+            while True:
+                try:
+                    msg = await asyncio.to_thread(q.get, True, 25)
+                    yield msg
+                except queue.Empty:
+                    yield ": heartbeat\n\n"
+        finally:
+            feed_events.unregister(q)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/announcements/{ann_id}", response_model=FeedItemDetail)
 def announcement_detail(ann_id: int, db: Session = Depends(get_db)) -> FeedItemDetail:
-    ann = db.get(RawAnnouncement, ann_id)
-    if ann is None:
+    row = db.execute(
+        select(RawAnnouncement, AnnouncementAnalysis, Company)
+        .outerjoin(AnnouncementAnalysis, AnnouncementAnalysis.announcement_id == RawAnnouncement.id)
+        .outerjoin(Company, Company.id == RawAnnouncement.company_id)
+        .where(RawAnnouncement.id == ann_id)
+    ).one_or_none()
+    if row is None:
         raise HTTPException(status_code=404, detail="Announcement not found")
-    analysis = db.scalar(
-        select(AnnouncementAnalysis).where(AnnouncementAnalysis.announcement_id == ann_id)
-    )
-    if analysis is None:
-        raise HTTPException(status_code=404, detail="Announcement not yet analyzed")
-    company = db.get(Company, ann.company_id) if ann.company_id else None
-    esr = db.scalar(select(EventStudyResult).where(EventStudyResult.announcement_id == ann_id))
+    ann, analysis, company = row
 
+    if not ann.triage_passed and ann.analysis_status == AnalysisStatus.skipped:
+        raise HTTPException(status_code=404, detail="Announcement not in feed")
+
+    esr = db.scalar(select(EventStudyResult).where(EventStudyResult.announcement_id == ann_id))
     event_study = None
     if esr is not None:
         event_study = EventStudyOut(
@@ -172,21 +146,10 @@ def announcement_detail(ann_id: int, db: Session = Depends(get_db)) -> FeedItemD
             abnormal_volume=esr.abnormal_volume, t_stat=esr.t_stat,
         )
 
-    return FeedItemDetail(
-        id=ann.id,
-        headline=ann.headline,
-        company=_company_out(company),
-        bse_scrip_code=ann.bse_scrip_code,
-        category=ann.category,
-        event_type=analysis.event_type,
-        direction=analysis.direction,
-        sentiment=analysis.sentiment,
-        summary=analysis.summary,
-        composite_score=analysis.composite_score,
-        announced_at=ann.announced_at,
-        attachment_url=ann.attachment_url,
-        model_provider=analysis.model_provider,
-        factors=Factors(
+    base = feed_item_from_row(ann, analysis, company)
+    factors = None
+    if analysis is not None and analysis.composite_score is not None:
+        factors = Factors(
             event_type=analysis.factor_event_type,
             materiality=analysis.factor_materiality,
             surprise=analysis.factor_surprise,
@@ -195,26 +158,33 @@ def announcement_detail(ann_id: int, db: Session = Depends(get_db)) -> FeedItemD
             liquidity=analysis.factor_liquidity,
             confidence=analysis.factor_confidence,
             time_decay=analysis.factor_time_decay,
-        ),
-        extracted=analysis.extracted,
+        )
+
+    return FeedItemDetail(
+        **base.model_dump(),
+        factors=factors,
+        extracted=analysis.extracted if analysis else None,
         event_study=event_study,
-        analysis_schema_version=analysis.analysis_schema_version,
-        materiality_hint=analysis.materiality_hint,
-        surprise_hint=analysis.surprise_hint,
-        llm_confidence=analysis.llm_confidence,
-        is_routine=analysis.is_routine or False,
+        analysis_schema_version=analysis.analysis_schema_version if analysis else None,
+        materiality_hint=analysis.materiality_hint if analysis else None,
+        surprise_hint=analysis.surprise_hint if analysis else None,
+        llm_confidence=analysis.llm_confidence if analysis else None,
+        is_routine=analysis.is_routine if analysis else False,
     )
 
 
 @app.get("/api/companies", response_model=list[CompanyAdmin])
 def list_companies(
     db: Session = Depends(get_db),
-    active_only: bool = True,
+    active_only: bool = False,
+    ingest_only: bool = True,
     q: str | None = None,
 ) -> list[CompanyAdmin]:
     stmt = select(Company)
     if active_only:
         stmt = stmt.where(Company.active.is_(True))
+    elif ingest_only:
+        stmt = stmt.where(Company.ingest_enabled.is_(True))
     if q:
         like = f"%{q.lower()}%"
         stmt = stmt.where(
@@ -274,6 +244,7 @@ def add_company(payload: AddCompanyRequest, db: Session = Depends(get_db)) -> Co
     company.nse_symbol = symbol
     company.yahoo_symbol = f"{symbol}.NS" if symbol else None
     company.sector = company.sector or rec.get("industry")
+    company.ingest_enabled = True
     company.active = True
     db.commit()
     db.refresh(company)
@@ -356,17 +327,34 @@ def delete_company(
 @app.get("/api/stats", response_model=StatsResponse)
 def stats(db: Session = Depends(get_db)) -> StatsResponse:
     llm = llm_status()
+    universe = db.scalar(
+        select(func.count()).select_from(Company).where(Company.ingest_enabled.is_(True))
+    ) or 0
+    watchlist = db.scalar(
+        select(func.count()).select_from(Company).where(Company.active.is_(True))
+    ) or 0
     return StatsResponse(
-        companies=db.scalar(
-            select(func.count()).select_from(Company).where(Company.active.is_(True))
+        universe_companies=universe,
+        watchlist_companies=watchlist,
+        companies=universe,
+        announcements_total=db.scalar(select(func.count()).select_from(RawAnnouncement)) or 0,
+        triage_passed=db.scalar(
+            select(func.count())
+            .select_from(RawAnnouncement)
+            .where(RawAnnouncement.triage_passed.is_(True))
         )
         or 0,
-        announcements_total=db.scalar(select(func.count()).select_from(RawAnnouncement)) or 0,
         analyzed=db.scalar(select(func.count()).select_from(AnnouncementAnalysis)) or 0,
         pending=db.scalar(
             select(func.count())
             .select_from(RawAnnouncement)
             .where(RawAnnouncement.analysis_status == AnalysisStatus.pending)
+        )
+        or 0,
+        skipped=db.scalar(
+            select(func.count())
+            .select_from(RawAnnouncement)
+            .where(RawAnnouncement.analysis_status == AnalysisStatus.skipped)
         )
         or 0,
         errors=db.scalar(
@@ -383,10 +371,21 @@ def stats(db: Session = Depends(get_db)) -> StatsResponse:
 
 
 @app.get("/api/event-types")
-def event_types(db: Session = Depends(get_db)) -> list[str]:
-    rows = db.scalars(
-        select(AnnouncementAnalysis.event_type)
-        .distinct()
-        .where(AnnouncementAnalysis.event_type.isnot(None))
-    ).all()
+def event_types(
+    db: Session = Depends(get_db),
+    view: str = Query("ranked", pattern="^(live|ranked)$"),
+) -> list[str]:
+    if view == "live":
+        rows = db.scalars(
+            select(RawAnnouncement.triage_event_type)
+            .distinct()
+            .where(RawAnnouncement.triage_passed.is_(True))
+            .where(RawAnnouncement.triage_event_type.isnot(None))
+        ).all()
+    else:
+        rows = db.scalars(
+            select(AnnouncementAnalysis.event_type)
+            .distinct()
+            .where(AnnouncementAnalysis.event_type.isnot(None))
+        ).all()
     return sorted(r for r in rows if r)

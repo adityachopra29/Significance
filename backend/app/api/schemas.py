@@ -66,6 +66,11 @@ class FeedItem(BaseModel):
     company: CompanyOut | None = None
     bse_scrip_code: str | None = None
     category: str | None = None
+    subcategory: str | None = None
+    analysis_status: str | None = None
+    triage_event_type: str | None = None
+    triage_tier: str | None = None
+    category_rank: int | None = None
     event_type: str | None = None
     direction: str | None = None
     sentiment: float | None = None
@@ -77,7 +82,7 @@ class FeedItem(BaseModel):
 
 
 class FeedItemDetail(FeedItem):
-    factors: Factors
+    factors: Factors | None = None
     extracted: dict | None = None
     event_study: EventStudyOut | None = None
     analysis_schema_version: str | None = None
@@ -90,13 +95,20 @@ class FeedItemDetail(FeedItem):
 class FeedResponse(BaseModel):
     total: int
     items: list[FeedItem]
+    limit: int = 50
+    offset: int = 0
+    view: str = "live"
 
 
 class StatsResponse(BaseModel):
-    companies: int
+    universe_companies: int = 0
+    watchlist_companies: int = 0
+    companies: int = 0  # alias for universe_companies
     announcements_total: int
+    triage_passed: int = 0
     analyzed: int
     pending: int
+    skipped: int = 0
     errors: int = 0
     llm_configured: bool = True
     llm_provider: str | None = None
