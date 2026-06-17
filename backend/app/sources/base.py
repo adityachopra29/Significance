@@ -18,6 +18,7 @@ class RawAnnouncementDTO:
     headline: str
     external_id: str | None = None
     bse_scrip_code: str | None = None
+    nse_symbol: str | None = None
     body: str | None = None
     category: str | None = None
     subcategory: str | None = None
@@ -31,7 +32,8 @@ class RawAnnouncementDTO:
             basis = f"{self.source}:{self.external_id}"
         else:
             ts = self.announced_at.isoformat() if self.announced_at else ""
-            basis = f"{self.source}:{self.bse_scrip_code}:{self.headline}:{ts}"
+            key = self.nse_symbol or self.bse_scrip_code or ""
+            basis = f"{self.source}:{key}:{self.headline}:{ts}"
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 

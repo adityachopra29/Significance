@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     feed_max_days: int = 15
     attachment_retention_days: int = 7
     purge_enabled: bool = False
+    nse_ingest_enabled: bool = True
+    nse_proxy_url: str = ""  # e.g. http://user:pass@host:port — for cloud/datacenter egress
 
     # Worker
     analyze_batch_size: int = 50
