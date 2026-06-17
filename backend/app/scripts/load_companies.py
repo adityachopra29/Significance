@@ -46,7 +46,7 @@ def load_csv(path: str, enrich: bool = False) -> int:
             company.yahoo_symbol = yahoo_symbol
             company.name = (row.get("name") or "").strip()
             company.sector = (row.get("sector") or "").strip() or None
-            company.active = True
+            company.ingest_enabled = True
             count += 1
 
     if enrich:
