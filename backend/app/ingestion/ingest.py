@@ -12,6 +12,9 @@ from dataclasses import dataclass
 
 from sqlalchemy import func, or_, select
 
+from app.analysis.triage import TriageAction, triage
+from app.api import events as feed_events
+from app.api.feed_helpers import feed_item_from_row
 from app.config import settings
 from app.db.base import session_scope
 from app.db.models import AnalysisStatus, Company, RawAnnouncement
@@ -32,29 +35,59 @@ class BackfillResult:
 
 
 def default_sources() -> list[Source]:
-    # Lightweight real-time poll: only the newest pages of today's all-feed.
     return [BSEAnnouncementsSource(max_pages=3)]
 
 
 def _since(session) -> dt.datetime:
     latest = session.scalar(select(func.max(RawAnnouncement.announced_at)))
     if latest is not None:
-        return latest - dt.timedelta(hours=6)  # small overlap to avoid gaps
+        return latest - dt.timedelta(hours=6)
     return dt.datetime.now() - dt.timedelta(days=settings.backfill_days)
 
 
 def _company_index(session) -> dict[str, int]:
-    """Map active companies' BSE scrip code -> company id."""
+    """Map ingested universe BSE scrip codes -> company id."""
     rows = session.execute(
-        select(Company.bse_scrip_code, Company.id).where(Company.active.is_(True))
+        select(Company.bse_scrip_code, Company.id).where(Company.ingest_enabled.is_(True))
     ).all()
     return {str(code): cid for code, cid in rows if code}
+
+
+def _apply_triage(dto: RawAnnouncementDTO) -> dict:
+    result = triage(
+        dto.headline,
+        dto.body,
+        category=dto.category,
+        subcategory=dto.subcategory,
+    )
+    if result.action == TriageAction.skip:
+        return {
+            "analysis_status": AnalysisStatus.skipped,
+            "triage_passed": False,
+            "triage_event_type": result.triage_event_type,
+            "triage_tier": result.triage_tier,
+            "triage_priority": result.triage_priority,
+            "category_rank": result.category_rank,
+            "skip_reason": result.skip_reason,
+            "triage_reason": result.triage_reason,
+        }
+    return {
+        "analysis_status": AnalysisStatus.pending,
+        "triage_passed": True,
+        "triage_event_type": result.triage_event_type,
+        "triage_tier": result.triage_tier,
+        "triage_priority": result.triage_priority,
+        "category_rank": result.category_rank,
+        "skip_reason": None,
+        "triage_reason": result.triage_reason,
+    }
 
 
 def run_ingestion(sources: list[Source] | None = None) -> dict:
     sources = sources or default_sources()
     inserted = 0
     seen = 0
+    new_ids: list[int] = []
 
     with session_scope() as session:
         since = _since(session)
@@ -70,28 +103,45 @@ def run_ingestion(sources: list[Source] | None = None) -> dict:
 
             for dto in dtos:
                 seen += 1
-                # Restrict to our universe (BSE 500) once the master is loaded.
                 company_id = company_idx.get(str(dto.bse_scrip_code)) if dto.bse_scrip_code else None
                 if universe_only and company_id is None:
                     continue
-                if _insert_if_new(session, dto, company_id):
+                ann_id = _insert_if_new(session, dto, company_id)
+                if ann_id:
                     inserted += 1
+                    new_ids.append(ann_id)
+
+    for ann_id in new_ids:
+        _emit_triaged(ann_id)
 
     logger.info("Ingestion: %d seen, %d inserted", seen, inserted)
     return {"seen": seen, "inserted": inserted}
 
 
-def backfill_universe(days: int | None = None) -> dict:
-    """Complete per-scrip backfill for every active company over `days`.
+def _emit_triaged(ann_id: int) -> None:
+    try:
+        with session_scope() as session:
+            row = session.execute(
+                select(RawAnnouncement, Company)
+                .outerjoin(Company, Company.id == RawAnnouncement.company_id)
+                .where(RawAnnouncement.id == ann_id)
+            ).one_or_none()
+            if row is None:
+                return
+            ann, company = row
+            if not ann.triage_passed:
+                return
+            feed_events.publish("announcement_triaged", feed_item_from_row(ann, None, company).model_dump(mode="json"))
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to emit triaged event for %d", ann_id)
 
-    Skips announcements already stored (by content_hash); only new rows are
-    inserted with analysis_status=pending.
-    """
+
+def backfill_universe(days: int | None = None) -> dict:
     days = days or settings.backfill_days
 
     with session_scope() as session:
         companies = session.execute(
-            select(Company.id, Company.bse_scrip_code).where(Company.active.is_(True))
+            select(Company.id, Company.bse_scrip_code).where(Company.ingest_enabled.is_(True))
         ).all()
 
     total = BackfillResult()
@@ -107,8 +157,7 @@ def backfill_universe(days: int | None = None) -> dict:
                 total.skipped += result.skipped
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Backfill failed for scrip %s: %s", scrip, exc)
-                continue
-            if idx % 50 == 0:
+            if idx % 100 == 0:
                 logger.info(
                     "Backfill progress: %d/%d companies, %d new, %d cached",
                     idx,
@@ -132,7 +181,6 @@ def backfill_universe(days: int | None = None) -> dict:
 
 
 def backfill_company(company_id: int, days: int | None = None) -> BackfillResult:
-    """Per-scrip backfill for one company. Re-adding a stock reuses cached analysis."""
     days = days or settings.backfill_days
     src = BSEAnnouncementsSource()
 
@@ -142,14 +190,7 @@ def backfill_company(company_id: int, days: int | None = None) -> BackfillResult
             return BackfillResult()
         scrip = company.bse_scrip_code
 
-    result = _backfill_one_scrip(src, company_id, str(scrip), days)
-    logger.info(
-        "Backfill company %s: %d new, %d cached",
-        scrip,
-        result.inserted,
-        result.skipped,
-    )
-    return result
+    return _backfill_one_scrip(src, company_id, str(scrip), days)
 
 
 def _backfill_one_scrip(
@@ -164,22 +205,22 @@ def _backfill_one_scrip(
 
     dtos = src.fetch_scrip(str(scrip), since=since, client=client)
     result = BackfillResult()
+    new_ids: list[int] = []
     with session_scope() as session:
         for dto in dtos:
-            if _insert_if_new(session, dto, company_id):
+            ann_id = _insert_if_new(session, dto, company_id)
+            if ann_id:
                 result.inserted += 1
+                new_ids.append(ann_id)
             else:
                 result.skipped += 1
+
+    for ann_id in new_ids:
+        _emit_triaged(ann_id)
     return result
 
 
 def _backfill_since(session, company_id: int, scrip: str, days: int) -> dt.datetime:
-    """Earliest date to fetch for a company.
-
-    - No stored filings → full window (now - days).
-    - Stored window doesn't reach back far enough → extend backward only.
-    - Window already covered → incremental poll from latest filing minus overlap.
-    """
     now = dt.datetime.now(dt.timezone.utc)
     earliest_needed = now - dt.timedelta(days=days)
 
@@ -206,33 +247,34 @@ def _backfill_since(session, company_id: int, scrip: str, days: int) -> dt.datet
     return earliest_needed.replace(tzinfo=None)
 
 
-def _insert_if_new(session, dto: RawAnnouncementDTO, company_id: int | None) -> bool:
+def _insert_if_new(session, dto: RawAnnouncementDTO, company_id: int | None) -> int | None:
     chash = dto.content_hash()
     existing = session.scalar(
         select(RawAnnouncement).where(RawAnnouncement.content_hash == chash)
     )
     if existing is not None:
-        # Re-link if company was removed and re-added (same filing, same analysis cache).
         if company_id and existing.company_id != company_id:
             existing.company_id = company_id
         if dto.bse_scrip_code and not existing.bse_scrip_code:
             existing.bse_scrip_code = dto.bse_scrip_code
-        return False
-    session.add(
-        RawAnnouncement(
-            source=dto.source,
-            external_id=dto.external_id,
-            content_hash=chash,
-            bse_scrip_code=dto.bse_scrip_code,
-            company_id=company_id,
-            headline=dto.headline,
-            body=dto.body,
-            category=dto.category,
-            subcategory=dto.subcategory,
-            attachment_url=dto.attachment_url,
-            announced_at=dto.announced_at,
-            analysis_status=AnalysisStatus.pending,
-            raw_json=dto.raw_json,
-        )
+        return None
+
+    triage_fields = _apply_triage(dto)
+    ann = RawAnnouncement(
+        source=dto.source,
+        external_id=dto.external_id,
+        content_hash=chash,
+        bse_scrip_code=dto.bse_scrip_code,
+        company_id=company_id,
+        headline=dto.headline,
+        body=dto.body,
+        category=dto.category,
+        subcategory=dto.subcategory,
+        attachment_url=dto.attachment_url,
+        announced_at=dto.announced_at,
+        raw_json=dto.raw_json,
+        **triage_fields,
     )
-    return True
+    session.add(ann)
+    session.flush()
+    return ann.id

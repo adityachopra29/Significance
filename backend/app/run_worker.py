@@ -17,6 +17,7 @@ from app.db.base import init_db, session_scope
 from app.db.models import Company, RawAnnouncement
 from app.fundamentals import marketcap
 from app.ingestion.ingest import backfill_universe, run_ingestion
+from app.ingestion.retention import run_retention
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,11 +36,19 @@ def poll_job() -> None:
 
 def analyze_job() -> None:
     try:
-        n = process_pending(limit=25)
+        n = process_pending()
         if n:
             logger.info("Analyzed %d announcements", n)
     except Exception:  # noqa: BLE001
         logger.exception("Analyze job failed")
+
+
+def retention_job() -> None:
+    try:
+        result = run_retention()
+        logger.info("Retention: %s", result)
+    except Exception:  # noqa: BLE001
+        logger.exception("Retention job failed")
 
 
 def marketcap_job() -> None:
@@ -61,7 +70,7 @@ def _missing_market_caps() -> int:
             session.scalar(
                 select(func.count())
                 .select_from(Company)
-                .where(Company.active.is_(True))
+                .where(Company.ingest_enabled.is_(True))
                 .where(Company.market_cap_cr.is_(None))
             )
             or 0
@@ -92,6 +101,7 @@ def main() -> None:
     scheduler = BlockingScheduler(timezone="Asia/Kolkata")
     scheduler.add_job(poll_job, "interval", seconds=settings.poll_interval_seconds, id="poll", max_instances=1)
     scheduler.add_job(analyze_job, "interval", seconds=20, id="analyze", max_instances=1)
+    scheduler.add_job(retention_job, "cron", hour=2, minute=30, id="retention", max_instances=1)
     # Daily market-cap refresh (after market close).
     scheduler.add_job(marketcap_job, "cron", hour=18, minute=30, id="marketcap", max_instances=1)
     try:
