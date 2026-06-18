@@ -491,7 +491,7 @@ def _ingest_dto(
     universe_only: bool,
 ) -> tuple[int | None, str]:
     if universe_only and company_id is None:
-        log_decision("rejected_universe", dto, company_id=None)
+        log_decision("rejected_universe", dto, company_id=None, session=session)
         return None, "rejected_universe"
 
     ann_id, decision = _insert_if_new(session, dto, company_id)
@@ -502,6 +502,7 @@ def _ingest_dto(
         company_id=company_id,
         announcement_id=ann_id,
         triage_passed=triage_passed if ann_id else None,
+        session=session,
     )
     return ann_id, decision
 

@@ -52,25 +52,28 @@ def log_decision(
     company_id: int | None = None,
     announcement_id: int | None = None,
     triage_passed: bool | None = None,
+    session=None,
 ) -> None:
     if _current_run_id is None:
         return
+    row = IngestDecision(
+        run_id=_current_run_id,
+        source=dto.source,
+        external_id=dto.external_id,
+        headline=(dto.headline or "")[:500],
+        bse_scrip_code=dto.bse_scrip_code,
+        nse_symbol=dto.nse_symbol,
+        company_id=company_id,
+        announcement_id=announcement_id,
+        decision=decision,
+        triage_passed=triage_passed,
+        announced_at=dto.announced_at,
+    )
+    if session is not None:
+        session.add(row)
+        return
     with session_scope() as session:
-        session.add(
-            IngestDecision(
-                run_id=_current_run_id,
-                source=dto.source,
-                external_id=dto.external_id,
-                headline=(dto.headline or "")[:500],
-                bse_scrip_code=dto.bse_scrip_code,
-                nse_symbol=dto.nse_symbol,
-                company_id=company_id,
-                announcement_id=announcement_id,
-                decision=decision,
-                triage_passed=triage_passed,
-                announced_at=dto.announced_at,
-            )
-        )
+        session.add(row)
 
 
 def summarize_run(run_id: str) -> dict:
