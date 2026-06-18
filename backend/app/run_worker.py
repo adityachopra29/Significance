@@ -81,9 +81,9 @@ def main() -> None:
     init_db()
     logger.info("DB initialized. Starting scheduler (poll every %ds).", settings.poll_interval_seconds)
 
-    # On a fresh DB, do a complete per-scrip backfill across the monitored universe.
-    if _is_empty():
-        logger.info("Empty DB: running %d-day universe backfill (per-scrip)...", settings.backfill_days)
+    # On a fresh DB, optionally backfill announcement history across the universe.
+    if settings.ingest_on_startup and _is_empty():
+        logger.info("Empty DB: running %d-day universe backfill...", settings.backfill_days)
         try:
             logger.info("Backfill done: %s", backfill_universe())
         except Exception:  # noqa: BLE001
@@ -94,13 +94,18 @@ def main() -> None:
         logger.info("Refreshing market caps (missing on %d companies)...", _missing_market_caps())
         marketcap_job()
 
-    # Initial pass so there is data immediately.
-    poll_job()
-    analyze_job()
+    if settings.ingest_on_startup:
+        poll_job()
+        analyze_job()
+    else:
+        logger.info("INGEST_ON_STARTUP=false — skipping poll/backfill/analyze until enabled.")
 
     scheduler = BlockingScheduler(timezone="Asia/Kolkata")
-    scheduler.add_job(poll_job, "interval", seconds=settings.poll_interval_seconds, id="poll", max_instances=1)
-    scheduler.add_job(analyze_job, "interval", seconds=20, id="analyze", max_instances=1)
+    if settings.ingest_on_startup:
+        scheduler.add_job(poll_job, "interval", seconds=settings.poll_interval_seconds, id="poll", max_instances=1)
+        scheduler.add_job(analyze_job, "interval", seconds=20, id="analyze", max_instances=1)
+    else:
+        logger.info("INGEST_ON_STARTUP=false — poll/analyze jobs not scheduled.")
     scheduler.add_job(retention_job, "cron", hour=2, minute=30, id="retention", max_instances=1)
     # Daily market-cap refresh (after market close).
     scheduler.add_job(marketcap_job, "cron", hour=18, minute=30, id="marketcap", max_instances=1)

@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     purge_enabled: bool = False
     nse_ingest_enabled: bool = True
     nse_proxy_url: str = ""  # e.g. http://user:pass@host:port — for cloud/datacenter egress
+    ingest_on_startup: bool = False  # worker: poll/backfill announcements on start
 
     # Worker
     analyze_batch_size: int = 50

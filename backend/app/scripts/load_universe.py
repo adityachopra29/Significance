@@ -94,8 +94,10 @@ def _upsert_company(
     if nse_symbol:
         company.nse_symbol = nse_symbol
         company.yahoo_symbol = f"{nse_symbol}.NS"
-    elif not company.yahoo_symbol and company.nse_symbol:
-        company.yahoo_symbol = f"{company.nse_symbol}.NS"
+    else:
+        company.nse_symbol = None
+        if scrip:
+            company.yahoo_symbol = f"{scrip}.BO"
     company.sector = sector or company.sector
     company.ingest_enabled = True
     return company
@@ -150,7 +152,7 @@ def load_merged(enrich: bool = False) -> dict:
         for rec in master["by_scrip"].values():
             isin = rec.get("isin")
             nse = nse_by_isin.get(isin) if isin else None
-            nse_symbol = nse["symbol"] if nse else rec.get("symbol")
+            nse_symbol = nse["symbol"] if nse else None
             name = rec["name"]
             if nse and nse.get("name"):
                 name = nse["name"]
