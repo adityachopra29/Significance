@@ -100,7 +100,7 @@ def feed(
 
 
 @app.get("/api/feed/events")
-async def feed_events() -> StreamingResponse:
+async def stream_feed_events() -> StreamingResponse:
     """SSE stream: announcement_triaged, analysis_started, analysis_done."""
 
     async def stream():
@@ -188,7 +188,9 @@ def list_companies(
     if q:
         like = f"%{q.lower()}%"
         stmt = stmt.where(
-            func.lower(Company.name).like(like) | func.lower(Company.nse_symbol).like(like)
+            func.lower(Company.name).like(like)
+            | func.lower(Company.nse_symbol).like(like)
+            | Company.bse_scrip_code.like(like)
         )
     companies = list(db.scalars(stmt.order_by(Company.name)))
 
