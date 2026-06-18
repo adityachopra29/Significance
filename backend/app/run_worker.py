@@ -51,9 +51,9 @@ def retention_job() -> None:
         logger.exception("Retention job failed")
 
 
-def marketcap_job() -> None:
+def marketcap_job(*, only_missing: bool = False) -> None:
     try:
-        result = marketcap.refresh_all()
+        result = marketcap.refresh_all(only_missing=only_missing)
         logger.info("Market cap refresh: %s", result)
     except Exception:  # noqa: BLE001
         logger.exception("Market cap job failed")
@@ -89,10 +89,11 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("Universe backfill failed")
 
-    # Populate market caps on first run if missing (needed for materiality/liquidity).
-    if _missing_market_caps():
-        logger.info("Refreshing market caps (missing on %d companies)...", _missing_market_caps())
-        marketcap_job()
+    # Fill missing market caps before analysis (materiality/liquidity scoring).
+    missing = _missing_market_caps()
+    if missing:
+        logger.info("Refreshing market caps (missing on %d companies)...", missing)
+        marketcap_job(only_missing=True)
 
     if settings.ingest_on_startup:
         poll_job()
@@ -108,7 +109,14 @@ def main() -> None:
         logger.info("INGEST_ON_STARTUP=false — poll/analyze jobs not scheduled.")
     scheduler.add_job(retention_job, "cron", hour=2, minute=30, id="retention", max_instances=1)
     # Daily market-cap refresh (after market close).
-    scheduler.add_job(marketcap_job, "cron", hour=18, minute=30, id="marketcap", max_instances=1)
+    scheduler.add_job(
+        lambda: marketcap_job(only_missing=True),
+        "cron",
+        hour=18,
+        minute=30,
+        id="marketcap",
+        max_instances=1,
+    )
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):

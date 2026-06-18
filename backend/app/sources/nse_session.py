@@ -1,8 +1,8 @@
 """Shared NSE India HTTP session with cookie warming.
 
-NSE blocks many datacenter IPs. Session cookies are required even when the
-homepage returns 403; the announcements JSON endpoint often still works.
-For AWS/Azure, set NSE_PROXY_URL to a residential or ISP proxy if requests fail.
+NSE endpoints have uneven protection (Akamai/WAF). The corporate-announcements
+API often works from scripts; quote-equity is frequently 403 even on home IPs.
+Datacenter egress may also be blocked — set NSE_PROXY_URL if announcements fail.
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def warm_client(*, timeout: float = 30.0) -> httpx.Client:
 
 
 def get_json(client: httpx.Client, url: str, *, retries: int = 3) -> Any:
-    """GET JSON from an NSE API path with simple retries."""
+    """GET JSON from an NSE API path with simple retries (403 fails fast)."""
     import time
 
     last_exc: Exception | None = None
@@ -63,16 +63,21 @@ def get_json(client: httpx.Client, url: str, *, retries: int = 3) -> Any:
             resp = client.get(url)
             if resp.status_code == 403:
                 raise httpx.HTTPStatusError(
-                    "NSE returned 403 (often datacenter IP block — set NSE_PROXY_URL)",
+                    "NSE returned 403 (WAF/bot protection or IP block — proxy may help for announcements)",
                     request=resp.request,
                     response=resp,
                 )
             resp.raise_for_status()
             return resp.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 403:
+                raise
+            last_exc = exc
         except (httpx.HTTPError, ValueError) as exc:
             last_exc = exc
+        if attempt + 1 < retries:
             wait = 1.5 * (attempt + 1)
-            logger.warning("NSE GET failed (attempt %d): %s; retry in %.1fs", attempt + 1, exc, wait)
+            logger.warning("NSE GET failed (attempt %d): %s; retry in %.1fs", attempt + 1, last_exc, wait)
             time.sleep(wait)
     if last_exc is not None:
         raise last_exc
