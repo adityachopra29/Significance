@@ -22,9 +22,13 @@ from app.sources.base import RawAnnouncementDTO, Source
 from app.sources.bse import BSEAnnouncementsSource
 from app.sources.nse import NSEAnnouncementsSource
 
+from app.ingestion.audit import finish_run, ingest_run, log_decision, summarize_run
+from app.ingestion.dedup import CROSS_EXCHANGE_TIME_WINDOW, exchange_dedup_hash
+
 logger = logging.getLogger(__name__)
 
-from app.ingestion.dedup import CROSS_EXCHANGE_TIME_WINDOW, exchange_dedup_hash
+
+@dataclass
 class BackfillResult:
     inserted: int = 0
     skipped: int = 0  # already in DB (analysis preserved)
@@ -112,45 +116,39 @@ def _apply_triage(dto: RawAnnouncementDTO) -> dict:
 
 def run_ingestion(sources: list[Source] | None = None) -> dict:
     sources = sources or default_sources()
-    inserted = 0
-    seen = 0
-    cross_skipped = 0
+    tallies: dict[str, int] = {}
     new_ids: list[int] = []
 
-    with session_scope() as session:
-        since = _since(session)
-        bse_idx, nse_idx = _company_indexes(session)
-        universe_only = bool(bse_idx or nse_idx)
+    with ingest_run("poll") as run_id:
+        with session_scope() as session:
+            since = _since(session)
+            bse_idx, nse_idx = _company_indexes(session)
+            universe_only = bool(bse_idx or nse_idx)
 
-        for src in sources:
-            try:
-                dtos = src.fetch(since=since)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Source %s failed: %s", src.name, exc)
-                continue
-
-            for dto in dtos:
-                seen += 1
-                company_id = _resolve_company_id(dto, bse_idx, nse_idx)
-                if universe_only and company_id is None:
+            for src in sources:
+                try:
+                    dtos = src.fetch(since=since)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Source %s failed: %s", src.name, exc)
                     continue
-                ann_id, cross = _insert_if_new(session, dto, company_id)
-                if cross:
-                    cross_skipped += 1
-                elif ann_id:
-                    inserted += 1
-                    new_ids.append(ann_id)
+
+                for dto in dtos:
+                    company_id = _resolve_company_id(dto, bse_idx, nse_idx)
+                    ann_id, decision = _ingest_dto(
+                        session, dto, company_id, universe_only=universe_only
+                    )
+                    _tally(decision, tallies)
+                    if ann_id:
+                        new_ids.append(ann_id)
+
+        stats = summarize_run(run_id)
+        finish_run(run_id, stats)
 
     for ann_id in new_ids:
         _emit_triaged(ann_id)
 
-    logger.info(
-        "Ingestion: %d seen, %d inserted, %d cross-exchange skipped",
-        seen,
-        inserted,
-        cross_skipped,
-    )
-    return {"seen": seen, "inserted": inserted, "cross_skipped": cross_skipped}
+    logger.info("Ingestion poll: %s", stats)
+    return stats
 
 
 def _emit_triaged(ann_id: int) -> None:
@@ -172,24 +170,32 @@ def _emit_triaged(ann_id: int) -> None:
 
 
 def backfill_universe(days: int | None = None) -> dict:
+    return run_backfill(days=days)
+
+
+def run_backfill(days: int | None = None) -> dict:
+    """Backfill BSE (all-market by day) + NSE (by day) with ingest audit logging."""
     days = days or settings.backfill_days
-    out: dict = {"days": days}
+    new_ids: list[int] = []
 
-    if settings.nse_ingest_enabled:
-        out["nse"] = backfill_nse_days(days)
+    with ingest_run("backfill", days=days) as run_id:
+        if settings.nse_ingest_enabled:
+            new_ids.extend(_backfill_nse_days_inner(days))
+        new_ids.extend(_backfill_bse_days_inner(days))
+        stats = summarize_run(run_id)
+        finish_run(run_id, stats)
 
-    out["bse"] = backfill_bse_universe(days)
-    return out
+    for ann_id in new_ids:
+        _emit_triaged(ann_id)
+
+    logger.info("Backfill %d days complete: %s", days, stats)
+    return stats
 
 
-def backfill_nse_days(days: int | None = None) -> dict:
-    """Backfill NSE announcements by calendar day (one API call per day)."""
-    days = days or settings.backfill_days
+def _backfill_nse_days_inner(days: int) -> list[int]:
     src = NSEAnnouncementsSource()
     today = dt.date.today()
     from_date = today - dt.timedelta(days=days)
-
-    total = BackfillResult()
     new_ids: list[int] = []
     client = src.warmed_client()
     try:
@@ -199,34 +205,40 @@ def backfill_nse_days(days: int | None = None) -> dict:
         with session_scope() as session:
             for dto in dtos:
                 company_id = _resolve_company_id(dto, bse_idx, nse_idx)
-                if company_id is None:
-                    continue
-                ann_id, cross = _insert_if_new(session, dto, company_id)
-                if cross:
-                    total.cross_skipped += 1
-                elif ann_id:
-                    total.inserted += 1
+                ann_id, _ = _ingest_dto(session, dto, company_id, universe_only=True)
+                if ann_id:
                     new_ids.append(ann_id)
-                else:
-                    total.skipped += 1
     finally:
         client.close()
+    return new_ids
 
+
+def _backfill_bse_days_inner(days: int, *, max_pages: int = 25) -> list[int]:
+    """BSE all-market fetch by day (faster than per-scrip for initial backfill)."""
+    since = dt.datetime.now() - dt.timedelta(days=days)
+    src = BSEAnnouncementsSource(max_pages=max_pages)
+    dtos = src.fetch(since=since)
+    new_ids: list[int] = []
+    with session_scope() as session:
+        bse_idx, nse_idx = _company_indexes(session)
+        for dto in dtos:
+            company_id = _resolve_company_id(dto, bse_idx, nse_idx)
+            ann_id, _ = _ingest_dto(session, dto, company_id, universe_only=True)
+            if ann_id:
+                new_ids.append(ann_id)
+    return new_ids
+
+
+def backfill_nse_days(days: int | None = None) -> dict:
+    """Backfill NSE only (legacy helper). Prefer run_backfill()."""
+    days = days or settings.backfill_days
+    with ingest_run("backfill_nse", days=days) as run_id:
+        new_ids = _backfill_nse_days_inner(days)
+        stats = summarize_run(run_id)
+        finish_run(run_id, stats)
     for ann_id in new_ids:
         _emit_triaged(ann_id)
-
-    logger.info(
-        "NSE backfill %d days: %d new, %d cached, %d cross-skipped",
-        days,
-        total.inserted,
-        total.skipped,
-        total.cross_skipped,
-    )
-    return {
-        "inserted": total.inserted,
-        "skipped": total.skipped,
-        "cross_skipped": total.cross_skipped,
-    }
+    return stats
 
 
 def backfill_bse_universe(days: int | None = None) -> dict:
@@ -294,13 +306,13 @@ def backfill_company(company_id: int, days: int | None = None) -> BackfillResult
         new_ids: list[int] = []
         with session_scope() as session:
             for dto in dtos:
-                ann_id, cross = _insert_if_new(session, dto, company_id)
-                if cross:
+                ann_id, decision = _insert_if_new(session, dto, company_id)
+                if decision == "rejected_cross_exchange":
                     total.cross_skipped += 1
                 elif ann_id:
                     total.inserted += 1
                     new_ids.append(ann_id)
-                else:
+                elif decision == "rejected_duplicate":
                     total.skipped += 1
         for ann_id in new_ids:
             _emit_triaged(ann_id)
@@ -323,13 +335,13 @@ def _backfill_one_scrip(
     new_ids: list[int] = []
     with session_scope() as session:
         for dto in dtos:
-            ann_id, cross = _insert_if_new(session, dto, company_id)
-            if cross:
+            ann_id, decision = _insert_if_new(session, dto, company_id)
+            if decision == "rejected_cross_exchange":
                 result.cross_skipped += 1
             elif ann_id:
                 result.inserted += 1
                 new_ids.append(ann_id)
-            else:
+            elif decision == "rejected_duplicate":
                 result.skipped += 1
 
     for ann_id in new_ids:
@@ -422,8 +434,8 @@ def _insert_if_new(
     session,
     dto: RawAnnouncementDTO,
     company_id: int | None,
-) -> tuple[int | None, bool]:
-    """Insert if new. Returns (ann_id, cross_exchange_skipped)."""
+) -> tuple[int | None, str]:
+    """Insert if new. Returns (announcement_id, decision_code)."""
     duplicate = _find_exchange_duplicate(
         session,
         company_id,
@@ -434,7 +446,7 @@ def _insert_if_new(
     )
     if duplicate is not None:
         _merge_announcement_fields(duplicate, dto)
-        return None, True
+        return None, "rejected_cross_exchange"
 
     chash = dto.content_hash()
     existing = session.scalar(
@@ -444,7 +456,7 @@ def _insert_if_new(
         if company_id and existing.company_id != company_id:
             existing.company_id = company_id
         _merge_announcement_fields(existing, dto)
-        return None, False
+        return None, "rejected_duplicate"
 
     ex_hash = exchange_dedup_hash(company_id, dto.announced_at, dto.headline, subcategory=dto.subcategory)
     triage_fields = _apply_triage(dto)
@@ -467,4 +479,32 @@ def _insert_if_new(
     )
     session.add(ann)
     session.flush()
-    return ann.id, False
+    decision = "accepted_triage" if ann.triage_passed else "accepted_skipped_triage"
+    return ann.id, decision
+
+
+def _ingest_dto(
+    session,
+    dto: RawAnnouncementDTO,
+    company_id: int | None,
+    *,
+    universe_only: bool,
+) -> tuple[int | None, str]:
+    if universe_only and company_id is None:
+        log_decision("rejected_universe", dto, company_id=None)
+        return None, "rejected_universe"
+
+    ann_id, decision = _insert_if_new(session, dto, company_id)
+    triage_passed = decision == "accepted_triage"
+    log_decision(
+        decision,
+        dto,
+        company_id=company_id,
+        announcement_id=ann_id,
+        triage_passed=triage_passed if ann_id else None,
+    )
+    return ann_id, decision
+
+
+def _tally(decision: str, tallies: dict[str, int]) -> None:
+    tallies[decision] = tallies.get(decision, 0) + 1

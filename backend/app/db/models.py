@@ -181,3 +181,38 @@ class EventStudyResult(Base):
     computed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     analysis: Mapped[AnnouncementAnalysis | None] = relationship(back_populates="event_study")
+
+
+class IngestRun(Base):
+    __tablename__ = "ingest_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)  # backfill | poll
+    days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stats_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    decisions: Mapped[list[IngestDecision]] = relationship(back_populates="run")
+
+
+class IngestDecision(Base):
+    __tablename__ = "ingest_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("ingest_runs.id"), index=True)
+    source: Mapped[str] = mapped_column(String(16), index=True)
+    external_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    headline: Mapped[str] = mapped_column(Text)
+    bse_scrip_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    nse_symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"), nullable=True, index=True)
+    announcement_id: Mapped[int | None] = mapped_column(
+        ForeignKey("raw_announcements.id"), nullable=True, index=True
+    )
+    decision: Mapped[str] = mapped_column(String(32), index=True)
+    triage_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    announced_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    run: Mapped[IngestRun] = relationship(back_populates="decisions")
