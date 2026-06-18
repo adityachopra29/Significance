@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +46,14 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_origins: str = "http://localhost:3000"
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalize_database_url(cls, value: str) -> str:
+        """Render/Heroku provide postgres:// — SQLAlchemy needs postgresql+psycopg2://."""
+        if isinstance(value, str) and value.startswith("postgres://"):
+            return "postgresql+psycopg2://" + value[len("postgres://") :]
+        return value
 
     @property
     def cors_origin_list(self) -> list[str]:

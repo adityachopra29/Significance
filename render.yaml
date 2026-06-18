@@ -1,0 +1,64 @@
+# Render Blueprint — connect repo at https://dashboard.render.com/blueprints
+# Set LLM_* and CORS_ORIGINS in the dashboard after first deploy.
+databases:
+  - name: aie-db
+    databaseName: aie
+    user: aie
+    plan: basic
+
+services:
+  - type: web
+    name: aie-api
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aie-db
+          property: connectionString
+      - key: CORS_ORIGINS
+        sync: false
+      - key: LLM_PROVIDER
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: NSE_INGEST_ENABLED
+        value: "true"
+      - key: INGEST_ON_STARTUP
+        value: "false"
+      - key: PURGE_ENABLED
+        value: "false"
+      - key: BACKFILL_DAYS
+        value: "90"
+
+  - type: worker
+    name: aie-worker
+    runtime: docker
+    rootDir: backend
+    dockerCommand: python -m app.run_worker
+    plan: starter
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aie-db
+          property: connectionString
+      - key: LLM_PROVIDER
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: NSE_INGEST_ENABLED
+        value: "true"
+      - key: INGEST_ON_STARTUP
+        value: "true"
+      - key: PURGE_ENABLED
+        value: "false"
+      - key: BACKFILL_DAYS
+        value: "90"
+      - key: NSE_PROXY_URL
+        sync: false

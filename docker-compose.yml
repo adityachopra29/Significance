@@ -16,5 +16,29 @@ services:
       timeout: 5s
       retries: 10
 
+  api:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://aie:aie@db:5432/aie
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    command: python -m app.run_worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://aie:aie@db:5432/aie
+      INGEST_ON_STARTUP: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   aie_pgdata:
