@@ -1,0 +1,48 @@
+---
+description: Announcement Intelligence Engine — data sources, deploy, and known pitfalls
+alwaysApply: true
+---
+
+# AIE platform learnings
+
+## What works
+
+- **BSE announcements** (`api.bseindia.com`): Works from home and cloud datacenter IPs. Per-scrip backfill + 60s poll.
+- **BSE market cap** (`StockTrading/w?scripcode=`): Reliable from any IP. Primary cap source for dual-listed and BSE-only names.
+- **NSE announcements** (`/api/corporate-announcements`): Works from home/residential IP via `httpx` + cookie warm. ~1k rows/day in smoke test.
+- **Yahoo** (`.NS` / `.BO`): Prices for event study; market-cap fallback when BSE empty (~204 BSE-only gaps, mostly ETFs/illiquid).
+- **Product loop**: ingest → triage → worker LLM + event study → Live/Ranked feeds + SSE.
+
+## What does not work (and why)
+
+- **NSE quote-equity** (market cap): **403 even on home Wi‑Fi** — Akamai bot manager (`_abck` cookies). Not an IP block; plain `httpx` cannot pass. **Do not retry aggressively** — skip after first 403 per run. Use BSE → Yahoo only.
+- **NSE from cloud** (announcements): Often **403** on AWS/Render/Azure egress. Mitigations: `NSE_PROXY_URL` (home Pi/residential), or `NSE_INGEST_ENABLED=false` (lose ~103 NSE-only names; dual-listed still on BSE).
+- **Yahoo `.BO`** for thin BSE codes: `possibly delisted` errors — expected for ~93 small caps + ~111 ETFs.
+
+## Worker / ops
+
+- `INGEST_ON_STARTUP=false` by default — load universe before first worker run.
+- Startup `refresh_all(only_missing=True)` — do not scan all 4,986 companies on boot.
+- `PURGE_ENABLED=false` until backtest export (`docs/backtesting.md`).
+- SSE route must not be named `feed_events` — shadows `app.api.events` module (`AttributeError: 'function' object has no attribute 'register'`).
+
+## Frontend
+
+- Company filter: **server-side** `/api/companies?q=` — never load 5k rows client-side. Guard `bse_scrip_code?.includes` (NSE-only rows have null BSE code).
+- Do not run `npm run build` while `npm run dev` is up — corrupts `.next`.
+
+## Universe
+
+- `load_universe --mode merged`: BSE active + NSE-only (ISIN not on BSE). ~4,986 companies.
+- Pre-deploy audit: `python -m app.scripts.audit_pre_deploy`.
+
+## Deploy
+
+- **Render**: `render.yaml` — web (API) + worker + Postgres. Set `LLM_*`, `CORS_ORIGINS`, optional `NSE_PROXY_URL` in dashboard.
+- **Vercel**: frontend with `NEXT_PUBLIC_API_URL`. `vercel.json` in `frontend/`.
+- **Docker**: `docker compose up` runs db + api + worker. `DATABASE_URL` uses `postgres://` normalization in `config.py`.
+- Bootstrap fresh DB: `load_universe --mode merged`, then `run_ingest_backfill --days 90`, worker with `INGEST_ON_STARTUP=true`.
+
+## NSE-only ingest risk
+
+48/103 NSE-only companies had zero announcements after 7-day backfill — depend on NSE poll from cloud. Test `test_nse_source --days 1` from deploy region.
