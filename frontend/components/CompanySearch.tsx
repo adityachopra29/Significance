@@ -1,32 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CompanyAdmin } from "@/lib/api";
+import { CompanyAdmin, getCompanies } from "@/lib/api";
 
 function companyLabel(c: CompanyAdmin): string {
   const parts = [c.name];
   if (c.nse_symbol) parts.push(c.nse_symbol);
-  parts.push(c.bse_scrip_code);
+  if (c.bse_scrip_code) parts.push(c.bse_scrip_code);
   return parts.join(" · ");
 }
 
-function matchesCompany(c: CompanyAdmin, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  return (
-    c.name.toLowerCase().includes(q) ||
-    c.bse_scrip_code.includes(q) ||
-    (c.nse_symbol?.toLowerCase().includes(q) ?? false)
-  );
-}
-
 export default function CompanySearch({
-  companies,
   value,
   onChange,
   placeholder = "Search name or code…",
 }: {
-  companies: CompanyAdmin[];
   value: string;
   onChange: (companyId: string) => void;
   placeholder?: string;
@@ -34,16 +22,40 @@ export default function CompanySearch({
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [options, setOptions] = useState<CompanyAdmin[]>([]);
+  const [selected, setSelected] = useState<CompanyAdmin | undefined>();
+  const [searching, setSearching] = useState(false);
 
-  const selected = useMemo(
-    () => (value ? companies.find((c) => String(c.id) === value) : undefined),
-    [companies, value],
-  );
+  useEffect(() => {
+    if (!value) setSelected(undefined);
+  }, [value]);
 
-  const options = useMemo(() => {
-    const filtered = companies.filter((c) => matchesCompany(c, query));
-    return filtered.slice(0, 40);
-  }, [companies, query]);
+  useEffect(() => {
+    const q = query.trim();
+    if (!open || q.length < 1) {
+      setOptions([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      getCompanies(q)
+        .then((rows) => {
+          if (!cancelled) setOptions(rows.slice(0, 40));
+        })
+        .catch(() => {
+          if (!cancelled) setOptions([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, query]);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -57,18 +69,49 @@ export default function CompanySearch({
   }, [selected]);
 
   const pick = (c: CompanyAdmin) => {
+    setSelected(c);
     onChange(String(c.id));
     setQuery("");
     setOpen(false);
   };
 
   const clear = () => {
+    setSelected(undefined);
     onChange("");
     setQuery("");
     setOpen(false);
+    setOptions([]);
   };
 
   const displayValue = open ? query : selected ? companyLabel(selected) : query;
+  const showHint = open && query.trim().length < 1;
+
+  const listContent = useMemo(() => {
+    if (showHint) {
+      return <li className="company-search-empty">Type a company name, NSE symbol, or BSE code…</li>;
+    }
+    if (searching) {
+      return <li className="company-search-empty">Searching…</li>;
+    }
+    if (options.length === 0) {
+      return <li className="company-search-empty">No match for “{query}”</li>;
+    }
+    return options.map((c) => (
+      <li key={c.id}>
+        <button
+          type="button"
+          className={`company-search-option${String(c.id) === value ? " selected" : ""}`}
+          onClick={() => pick(c)}
+        >
+          <span className="company-search-name">{c.name}</span>
+          <span className="company-search-codes">
+            {c.nse_symbol && <span>{c.nse_symbol}</span>}
+            {c.bse_scrip_code && <span>{c.bse_scrip_code}</span>}
+          </span>
+        </button>
+      </li>
+    ));
+  }, [showHint, searching, options, query, value]);
 
   return (
     <div className="company-search" ref={rootRef}>
@@ -80,7 +123,10 @@ export default function CompanySearch({
           placeholder={selected ? companyLabel(selected) : placeholder}
           onChange={(e) => {
             setQuery(e.target.value);
-            if (selected) onChange("");
+            if (selected) {
+              setSelected(undefined);
+              onChange("");
+            }
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
@@ -100,24 +146,7 @@ export default function CompanySearch({
               </button>
             </li>
           )}
-          {options.length === 0 && (
-            <li className="company-search-empty">No match for “{query}”</li>
-          )}
-          {options.map((c) => (
-            <li key={c.id}>
-              <button
-                type="button"
-                className={`company-search-option${String(c.id) === value ? " selected" : ""}`}
-                onClick={() => pick(c)}
-              >
-                <span className="company-search-name">{c.name}</span>
-                <span className="company-search-codes">
-                  {c.nse_symbol && <span>{c.nse_symbol}</span>}
-                  <span>{c.bse_scrip_code}</span>
-                </span>
-              </button>
-            </li>
-          ))}
+          {listContent}
         </ul>
       )}
     </div>

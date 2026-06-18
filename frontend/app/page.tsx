@@ -2,11 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  CompanyAdmin,
   FeedItem,
   FeedView,
   Stats,
-  getCompanies,
   getEventTypes,
   getFeed,
   getStats,
@@ -26,7 +24,6 @@ export default function Dashboard() {
   const [offset, setOffset] = useState(0);
   const [stats, setStats] = useState<Stats | null>(null);
   const [eventTypes, setEventTypes] = useState<string[]>([]);
-  const [companies, setCompanies] = useState<CompanyAdmin[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
@@ -70,10 +67,6 @@ export default function Dashboard() {
     }
   }, [view, days, sortBy, offset, minScore, eventType, direction, companyId]);
 
-  const loadCompanies = useCallback(() => {
-    getCompanies().then(setCompanies).catch(() => {});
-  }, []);
-
   useEffect(() => {
     setOffset(0);
   }, [view, days, sortBy, minScore, eventType, direction, companyId]);
@@ -84,8 +77,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     getEventTypes(view).then(setEventTypes).catch(() => {});
-    loadCompanies();
-  }, [view, loadCompanies]);
+  }, [view]);
 
   const upsertItem = useCallback(
     (eventType: string, incoming: FeedItem) => {
@@ -284,7 +276,7 @@ export default function Dashboard() {
         )}
         <label className="filter-company">
           Company
-          <CompanySearch companies={companies} value={companyId} onChange={setCompanyId} />
+          <CompanySearch value={companyId} onChange={setCompanyId} />
         </label>
       </div>
 
@@ -385,7 +377,6 @@ export default function Dashboard() {
         <ManageStocks
           onClose={() => setManaging(false)}
           onChanged={() => {
-            loadCompanies();
             load();
           }}
         />

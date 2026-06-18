@@ -64,7 +64,7 @@ export default function ManageStocks({
     (c) =>
       !search ||
       c.name.toLowerCase().includes(search.toLowerCase()) ||
-      c.bse_scrip_code.includes(search) ||
+      c.bse_scrip_code?.includes(search) ||
       (c.nse_symbol || "").toLowerCase().includes(search.toLowerCase()),
   );
 
