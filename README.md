@@ -39,7 +39,7 @@ pip install -r requirements.txt
 cp ../.env.example ../.env       # set LLM_PROVIDER + LLM_API_KEY before running the worker
 
 # Load the BSE 500 company master (seed of ~50 large caps included)
-python -m app.scripts.load_companies                 # add --enrich for market caps via Yahoo
+python -m app.scripts.load_companies                 # add --enrich for market caps (BSE/NSE, Yahoo fallback)
 
 # Start the API
 uvicorn app.api.main:app --reload --port 8000
@@ -72,11 +72,13 @@ npm run dev                       # http://localhost:3000
 
 To analyze announcements, set `LLM_PROVIDER`, `LLM_MODEL`, and `LLM_API_KEY`. Without a configured LLM, the dashboard shows a configuration error and the worker does not silently fall back.
 
-## Deploying (Azure)
+## Deploying (Azure / cloud)
 
-- **Backend + worker**: two Azure Container Apps (API runs `uvicorn`, worker runs `python -m app.run_worker`).
-- **Database**: Azure Database for PostgreSQL.
-- **Frontend**: Vercel (set `NEXT_PUBLIC_API_URL` to the API URL).
+See **[docs/deployment.md](docs/deployment.md)** for full cloud setup and **[docs/pre-deploy-audit.md](docs/pre-deploy-audit.md)** for universe / market-cap / ingest gap reports.
+
+- **Backend + worker**: two containers (API: `uvicorn`, worker: `python -m app.run_worker`).
+- **Database**: managed PostgreSQL.
+- **Frontend**: Vercel (`NEXT_PUBLIC_API_URL` → API URL).
 
 ## Roadmap (post-v1)
 

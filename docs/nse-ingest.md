@@ -136,3 +136,7 @@ python -m app.scripts.load_universe --mode merged --enrich
 - SME / debt / REIT announcement indices
 - Fuzzy cross-exchange headline matching (time-window dedup only)
 - Bulk/block deals, insider (PIT) feeds
+
+## Pre-deploy gap report
+
+Run `python -m app.scripts.audit_pre_deploy` and see [pre-deploy-audit.md](./pre-deploy-audit.md) for NSE-only ingest risk and universe gaps.

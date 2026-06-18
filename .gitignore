@@ -20,6 +20,8 @@ npm-debug.log*
 # Data / logs
 *.log
 backend/data/*.local.csv
+backend/data/pre_deploy_audit/
+backend/data/marketcap_gaps.json
 
 # OS
 .DS_Store
