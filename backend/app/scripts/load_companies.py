@@ -3,7 +3,7 @@
 Usage:
     python -m app.scripts.load_companies                       # load seed CSV
     python -m app.scripts.load_companies --csv path/to.csv     # load custom CSV
-    python -m app.scripts.load_companies --enrich              # also fetch market cap via Yahoo
+    python -m app.scripts.load_companies --enrich              # also fetch market cap (BSE/NSE, Yahoo fallback)
 
 CSV columns required: bse_scrip_code, nse_symbol, name, sector
 """
@@ -55,23 +55,11 @@ def load_csv(path: str, enrich: bool = False) -> int:
 
 
 def _enrich_market_caps() -> None:
-    """Best-effort market-cap enrichment via yfinance."""
-    try:
-        import yfinance as yf
-    except ImportError:
-        print("yfinance not installed; skipping enrichment.")
-        return
+    """Best-effort market-cap enrichment via BSE/NSE with Yahoo fallback."""
+    from app.fundamentals import marketcap
 
-    with session_scope() as session:
-        companies = list(session.scalars(select(Company).where(Company.yahoo_symbol.isnot(None))))
-        for company in companies:
-            try:
-                info = yf.Ticker(company.yahoo_symbol).fast_info
-                mcap = getattr(info, "market_cap", None)
-                if mcap:
-                    company.market_cap_cr = float(mcap) / 1e7  # rupees -> crore
-            except Exception as exc:  # noqa: BLE001
-                print(f"  enrich failed for {company.yahoo_symbol}: {exc}")
+    result = marketcap.refresh_all(only_missing=False, pause=0.2)
+    print(f"  market cap enrich: {result['updated']}/{result['companies']} updated")
 
 
 def main() -> None:

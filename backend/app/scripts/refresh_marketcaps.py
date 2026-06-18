@@ -1,4 +1,4 @@
-"""Refresh market caps for the monitored universe (unified BSE + NSE source).
+"""Refresh market caps for the monitored universe (BSE → NSE → Yahoo).
 
 Usage:
     python -m app.scripts.refresh_marketcaps              # refresh all active
