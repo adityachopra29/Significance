@@ -22,6 +22,7 @@ from app.db.models import (
 )
 from app.api import events as feed_events
 from app.api.feed_helpers import feed_item_from_row
+from app.ingestion.ingest import SKIP_REASON_HISTORICAL
 from app.prices import yahoo
 
 logger = logging.getLogger(__name__)
@@ -43,16 +44,19 @@ def process_pending(limit: int | None = None) -> int:
     limit = limit or settings.analyze_batch_size
 
     with session_scope() as session:
+        stmt = (
+            select(RawAnnouncement.id)
+            .where(RawAnnouncement.analysis_status == AnalysisStatus.pending)
+            .where(RawAnnouncement.triage_passed.is_(True))
+        )
+        if settings.analyze_from is not None:
+            stmt = stmt.where(RawAnnouncement.fetched_at >= settings.analyze_from)
         ids = list(
             session.scalars(
-                select(RawAnnouncement.id)
-                .where(RawAnnouncement.analysis_status == AnalysisStatus.pending)
-                .where(RawAnnouncement.triage_passed.is_(True))
-                .order_by(
+                stmt.order_by(
                     RawAnnouncement.triage_priority.asc().nullslast(),
                     RawAnnouncement.announced_at.desc().nullslast(),
-                )
-                .limit(limit)
+                ).limit(limit)
             )
         )
     for aid in ids:
@@ -103,7 +107,12 @@ def _recover_stuck_processing() -> None:
         ).all()
         for aid in stuck:
             ann = session.get(RawAnnouncement, aid)
-            if ann is not None:
+            if ann is None:
+                continue
+            if settings.analyze_from is not None and ann.fetched_at < settings.analyze_from:
+                ann.analysis_status = AnalysisStatus.skipped
+                ann.skip_reason = SKIP_REASON_HISTORICAL
+            else:
                 ann.analysis_status = AnalysisStatus.pending
 
 
