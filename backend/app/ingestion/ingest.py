@@ -27,6 +27,8 @@ from app.ingestion.dedup import CROSS_EXCHANGE_TIME_WINDOW, exchange_dedup_hash
 
 logger = logging.getLogger(__name__)
 
+SKIP_REASON_HISTORICAL = "historical_backfill"
+
 
 @dataclass
 class BackfillResult:
@@ -84,7 +86,7 @@ def _resolve_company_id(
     return None
 
 
-def _apply_triage(dto: RawAnnouncementDTO) -> dict:
+def _apply_triage(dto: RawAnnouncementDTO, *, eligible_for_analysis: bool = True) -> dict:
     result = triage(
         dto.headline,
         dto.body,
@@ -102,6 +104,17 @@ def _apply_triage(dto: RawAnnouncementDTO) -> dict:
             "skip_reason": result.skip_reason,
             "triage_reason": result.triage_reason,
         }
+    if not eligible_for_analysis:
+        return {
+            "analysis_status": AnalysisStatus.skipped,
+            "triage_passed": True,
+            "triage_event_type": result.triage_event_type,
+            "triage_tier": result.triage_tier,
+            "triage_priority": result.triage_priority,
+            "category_rank": result.category_rank,
+            "skip_reason": SKIP_REASON_HISTORICAL,
+            "triage_reason": result.triage_reason,
+        }
     return {
         "analysis_status": AnalysisStatus.pending,
         "triage_passed": True,
@@ -112,6 +125,81 @@ def _apply_triage(dto: RawAnnouncementDTO) -> dict:
         "skip_reason": None,
         "triage_reason": result.triage_reason,
     }
+
+
+def archive_pending_before(cutoff: dt.datetime) -> int:
+    """Skip pending rows ingested before deploy cutoff (idempotent)."""
+    from sqlalchemy import update
+
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=dt.timezone.utc)
+    with session_scope() as session:
+        result = session.execute(
+            update(RawAnnouncement)
+            .where(RawAnnouncement.analysis_status == AnalysisStatus.pending)
+            .where(RawAnnouncement.fetched_at < cutoff)
+            .values(
+                analysis_status=AnalysisStatus.skipped,
+                skip_reason=SKIP_REASON_HISTORICAL,
+            )
+        )
+        return result.rowcount or 0
+
+
+def repair_orphan_analysis_status(cutoff: dt.datetime | None = None) -> dict[str, int]:
+    """Fix done/processing rows with no saved analysis (e.g. partial DB restore)."""
+    from sqlalchemy import exists, update
+
+    from app.db.models import AnnouncementAnalysis
+
+    has_analysis = exists(
+        select(AnnouncementAnalysis.id).where(
+            AnnouncementAnalysis.announcement_id == RawAnnouncement.id,
+            AnnouncementAnalysis.composite_score.isnot(None),
+        )
+    )
+    orphan = (
+        RawAnnouncement.analysis_status.in_((AnalysisStatus.done, AnalysisStatus.processing))
+        & ~has_analysis
+    )
+
+    skipped = 0
+    requeued = 0
+    with session_scope() as session:
+        if cutoff is not None:
+            if cutoff.tzinfo is None:
+                cutoff = cutoff.replace(tzinfo=dt.timezone.utc)
+            result = session.execute(
+                update(RawAnnouncement)
+                .where(orphan)
+                .where(RawAnnouncement.fetched_at < cutoff)
+                .values(
+                    analysis_status=AnalysisStatus.skipped,
+                    skip_reason=SKIP_REASON_HISTORICAL,
+                )
+            )
+            skipped = result.rowcount or 0
+
+        stmt = (
+            update(RawAnnouncement)
+            .where(orphan)
+            .values(
+                analysis_status=AnalysisStatus.pending,
+                skip_reason=None,
+            )
+        )
+        if cutoff is not None:
+            stmt = stmt.where(RawAnnouncement.fetched_at >= cutoff)
+        result = session.execute(stmt)
+        requeued = result.rowcount or 0
+
+    if skipped or requeued:
+        logger.info(
+            "Repaired orphan analysis status: %d skipped (pre-cutoff), %d re-queued",
+            skipped,
+            requeued,
+        )
+    return {"skipped": skipped, "requeued": requeued}
 
 
 def run_ingestion(sources: list[Source] | None = None) -> dict:
@@ -133,13 +221,27 @@ def run_ingestion(sources: list[Source] | None = None) -> dict:
                     continue
 
                 for dto in dtos:
-                    company_id = _resolve_company_id(dto, bse_idx, nse_idx)
-                    ann_id, decision = _ingest_dto(
-                        session, dto, company_id, universe_only=universe_only
-                    )
-                    _tally(decision, tallies)
-                    if ann_id:
-                        new_ids.append(ann_id)
+                    try:
+                        company_id = _resolve_company_id(dto, bse_idx, nse_idx)
+                        ann_id, decision = _ingest_dto(
+                            session, dto, company_id, universe_only=universe_only
+                        )
+                        _tally(decision, tallies)
+                        if ann_id:
+                            new_ids.append(ann_id)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Ingest row failed (%s): %s",
+                            src.name,
+                            (dto.headline or "")[:120],
+                        )
+                        log_decision(
+                            "rejected_error",
+                            dto,
+                            company_id=_resolve_company_id(dto, bse_idx, nse_idx),
+                            session=session,
+                        )
+                        _tally("rejected_error", tallies)
 
         stats = summarize_run(run_id)
         finish_run(run_id, stats)
@@ -205,7 +307,13 @@ def _backfill_nse_days_inner(days: int) -> list[int]:
         with session_scope() as session:
             for dto in dtos:
                 company_id = _resolve_company_id(dto, bse_idx, nse_idx)
-                ann_id, _ = _ingest_dto(session, dto, company_id, universe_only=True)
+                ann_id, _ = _ingest_dto(
+                    session,
+                    dto,
+                    company_id,
+                    universe_only=True,
+                    eligible_for_analysis=settings.analyze_backfill,
+                )
                 if ann_id:
                     new_ids.append(ann_id)
     finally:
@@ -223,7 +331,13 @@ def _backfill_bse_days_inner(days: int, *, max_pages: int = 25) -> list[int]:
         bse_idx, nse_idx = _company_indexes(session)
         for dto in dtos:
             company_id = _resolve_company_id(dto, bse_idx, nse_idx)
-            ann_id, _ = _ingest_dto(session, dto, company_id, universe_only=True)
+            ann_id, _ = _ingest_dto(
+                session,
+                dto,
+                company_id,
+                universe_only=True,
+                eligible_for_analysis=settings.analyze_backfill,
+            )
             if ann_id:
                 new_ids.append(ann_id)
     return new_ids
@@ -306,7 +420,12 @@ def backfill_company(company_id: int, days: int | None = None) -> BackfillResult
         new_ids: list[int] = []
         with session_scope() as session:
             for dto in dtos:
-                ann_id, decision = _insert_if_new(session, dto, company_id)
+                ann_id, decision = _insert_if_new(
+                    session,
+                    dto,
+                    company_id,
+                    eligible_for_analysis=settings.analyze_backfill,
+                )
                 if decision == "rejected_cross_exchange":
                     total.cross_skipped += 1
                 elif ann_id:
@@ -335,7 +454,12 @@ def _backfill_one_scrip(
     new_ids: list[int] = []
     with session_scope() as session:
         for dto in dtos:
-            ann_id, decision = _insert_if_new(session, dto, company_id)
+            ann_id, decision = _insert_if_new(
+                session,
+                dto,
+                company_id,
+                eligible_for_analysis=settings.analyze_backfill,
+            )
             if decision == "rejected_cross_exchange":
                 result.cross_skipped += 1
             elif ann_id:
@@ -434,6 +558,8 @@ def _insert_if_new(
     session,
     dto: RawAnnouncementDTO,
     company_id: int | None,
+    *,
+    eligible_for_analysis: bool = True,
 ) -> tuple[int | None, str]:
     """Insert if new. Returns (announcement_id, decision_code)."""
     duplicate = _find_exchange_duplicate(
@@ -459,7 +585,7 @@ def _insert_if_new(
         return None, "rejected_duplicate"
 
     ex_hash = exchange_dedup_hash(company_id, dto.announced_at, dto.headline, subcategory=dto.subcategory)
-    triage_fields = _apply_triage(dto)
+    triage_fields = _apply_triage(dto, eligible_for_analysis=eligible_for_analysis)
     ann = RawAnnouncement(
         source=dto.source,
         external_id=dto.external_id,
@@ -489,12 +615,18 @@ def _ingest_dto(
     company_id: int | None,
     *,
     universe_only: bool,
+    eligible_for_analysis: bool = True,
 ) -> tuple[int | None, str]:
     if universe_only and company_id is None:
         log_decision("rejected_universe", dto, company_id=None, session=session)
         return None, "rejected_universe"
 
-    ann_id, decision = _insert_if_new(session, dto, company_id)
+    ann_id, decision = _insert_if_new(
+        session,
+        dto,
+        company_id,
+        eligible_for_analysis=eligible_for_analysis,
+    )
     triage_passed = decision == "accepted_triage"
     log_decision(
         decision,

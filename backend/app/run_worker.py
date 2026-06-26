@@ -5,6 +5,7 @@ Run as a separate process from the API:
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -16,7 +17,12 @@ from app.config import settings
 from app.db.base import init_db, session_scope
 from app.db.models import Company, RawAnnouncement
 from app.fundamentals import marketcap
-from app.ingestion.ingest import backfill_universe, run_ingestion
+from app.ingestion.ingest import (
+    archive_pending_before,
+    backfill_universe,
+    repair_orphan_analysis_status,
+    run_ingestion,
+)
 from app.ingestion.retention import run_retention
 
 logging.basicConfig(
@@ -81,6 +87,24 @@ def main() -> None:
     init_db()
     logger.info("DB initialized. Starting scheduler (poll every %ds).", settings.poll_interval_seconds)
 
+    if settings.analyze_from is not None:
+        archived = archive_pending_before(settings.analyze_from)
+        if archived:
+            logger.info(
+                "Skipped %d pre-deploy pending announcements (ANALYZE_FROM=%s)",
+                archived,
+                settings.analyze_from.isoformat(),
+            )
+        logger.info(
+            "Analysis queue: announcements ingested on/after %s (backfill analyze=%s)",
+            settings.analyze_from.isoformat(),
+            settings.analyze_backfill,
+        )
+
+    repaired = repair_orphan_analysis_status(settings.analyze_from)
+    if repaired["skipped"] or repaired["requeued"]:
+        logger.info("Orphan analysis repair: %s", repaired)
+
     # On a fresh DB, optionally backfill announcement history across the universe.
     if settings.ingest_on_startup and _is_empty():
         logger.info("Empty DB: running %d-day universe backfill...", settings.backfill_days)
@@ -89,11 +113,10 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("Universe backfill failed")
 
-    # Fill missing market caps before analysis (materiality/liquidity scoring).
+    # Queue missing market caps without blocking poll/analyze startup.
     missing = _missing_market_caps()
     if missing:
-        logger.info("Refreshing market caps (missing on %d companies)...", missing)
-        marketcap_job(only_missing=True)
+        logger.info("Queuing market-cap refresh for %d companies (non-blocking)...", missing)
 
     if settings.ingest_on_startup:
         poll_job()
@@ -108,6 +131,15 @@ def main() -> None:
     else:
         logger.info("INGEST_ON_STARTUP=false — poll/analyze jobs not scheduled.")
     scheduler.add_job(retention_job, "cron", hour=2, minute=30, id="retention", max_instances=1)
+    if missing:
+        scheduler.add_job(
+            lambda: marketcap_job(only_missing=True),
+            "date",
+            run_date=dt.datetime.now(dt.timezone.utc),
+            id="marketcap_startup",
+            max_instances=1,
+            replace_existing=True,
+        )
     # Daily market-cap refresh (after market close).
     scheduler.add_job(
         lambda: marketcap_job(only_missing=True),
