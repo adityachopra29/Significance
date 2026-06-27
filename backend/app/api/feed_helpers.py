@@ -32,6 +32,17 @@ def company_out(c: Company | None) -> CompanyOut | None:
     )
 
 
+def _effective_analysis_status(
+    ann: RawAnnouncement,
+    analysis: AnnouncementAnalysis | None,
+) -> str | None:
+    """Don't report done when analysis row is missing (partial DB restore)."""
+    status = ann.analysis_status.value if ann.analysis_status else None
+    if status == "done" and (analysis is None or analysis.composite_score is None):
+        return "skipped" if ann.skip_reason else "pending"
+    return status
+
+
 def feed_item_from_row(
     ann: RawAnnouncement,
     analysis: AnnouncementAnalysis | None,
@@ -44,7 +55,7 @@ def feed_item_from_row(
         bse_scrip_code=ann.bse_scrip_code,
         category=ann.category,
         subcategory=ann.subcategory,
-        analysis_status=ann.analysis_status.value if ann.analysis_status else None,
+        analysis_status=_effective_analysis_status(ann, analysis),
         triage_event_type=ann.triage_event_type,
         triage_tier=ann.triage_tier,
         category_rank=ann.category_rank,

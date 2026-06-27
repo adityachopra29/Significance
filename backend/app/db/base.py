@@ -87,6 +87,13 @@ def _run_column_migrations() -> None:
         conn.execute(text("ALTER TABLE companies ALTER COLUMN bse_scrip_code DROP NOT NULL"))
 
 
+def _run_type_migrations() -> None:
+    """Widen columns when exchange payloads exceed original VARCHAR limits."""
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE raw_announcements ALTER COLUMN category TYPE TEXT"))
+        conn.execute(text("ALTER TABLE raw_announcements ALTER COLUMN subcategory TYPE TEXT"))
+
+
 def _backfill_triage_defaults() -> None:
     """Existing rows pre-triage: treat analyzed/pending as triage-passed."""
     with engine.begin() as conn:
@@ -107,6 +114,24 @@ def _backfill_triage_defaults() -> None:
         )
 
 
+def _fix_announced_at_ist_as_utc() -> None:
+    """Correct rows ingested with naive IST stored as UTC (Azure PG timezone=UTC)."""
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                UPDATE raw_announcements
+                SET announced_at = announced_at - interval '5 hours 30 minutes'
+                WHERE announced_at IS NOT NULL
+                  AND announced_at > fetched_at + interval '15 minutes'
+                """
+            )
+        )
+        fixed = result.rowcount or 0
+        if fixed:
+            logger.info("Fixed IST-as-UTC announced_at on %d rows", fixed)
+
+
 def init_db() -> None:
     """Create all tables, then apply idempotent column migrations."""
     from app.db import models  # noqa: F401
@@ -114,7 +139,9 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     try:
         _run_column_migrations()
+        _run_type_migrations()
         _run_enum_migrations()
         _backfill_triage_defaults()
+        _fix_announced_at_ist_as_utc()
     except Exception:  # noqa: BLE001
         logger.exception("Column migration failed")

@@ -71,8 +71,8 @@ class RawAnnouncement(Base):
 
     headline: Mapped[str] = mapped_column(Text)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
-    category: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    subcategory: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subcategory: Mapped[str | None] = mapped_column(Text, nullable=True)
     attachment_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     attachment_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # extracted PDF body
     attachment_fetched: Mapped[bool] = mapped_column(Boolean, default=False)  # PDF fetch attempted
