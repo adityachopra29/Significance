@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 import httpx
 
 from app.sources.base import RawAnnouncementDTO, Source
+from app.sources.exchange_time import parse_exchange_dt
 from app.sources.nse_session import get_json, warm_client
 
 logger = logging.getLogger(__name__)
@@ -30,23 +31,7 @@ _HEADLINE_RE = re.compile(r"regarding\s+['\"]([^'\"]+)['\"]", re.IGNORECASE)
 
 
 def _parse_dt(value: str | None) -> dt.datetime | None:
-    if not value:
-        return None
-    value = value.strip()
-    for fmt in (
-        "%d-%b-%Y %H:%M:%S",
-        "%d-%b-%Y %H:%M",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-    ):
-        try:
-            return dt.datetime.strptime(value[:26], fmt)
-        except ValueError:
-            continue
-    try:
-        return dt.datetime.fromisoformat(value)
-    except ValueError:
-        return None
+    return parse_exchange_dt(value)
 
 
 def _headline_from_row(row: dict) -> str:

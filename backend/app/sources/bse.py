@@ -14,6 +14,7 @@ import time
 import httpx
 
 from app.sources.base import RawAnnouncementDTO, Source
+from app.sources.exchange_time import parse_exchange_dt
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +33,7 @@ HEADERS = {
 
 
 def _parse_dt(value: str | None) -> dt.datetime | None:
-    if not value:
-        return None
-    value = value.strip()
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%d %b %Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return dt.datetime.strptime(value[: len(fmt) + 6], fmt)
-        except ValueError:
-            continue
-    try:
-        return dt.datetime.fromisoformat(value)
-    except ValueError:
-        return None
+    return parse_exchange_dt(value)
 
 
 class BSEAnnouncementsSource(Source):
