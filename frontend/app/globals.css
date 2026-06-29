@@ -47,6 +47,18 @@ a {
   margin-bottom: 8px;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-logo {
+  border-radius: 10px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
 .title {
   font-size: 26px;
   font-weight: 700;
@@ -117,6 +129,48 @@ a {
   min-width: 220px;
   flex: 1;
   max-width: 320px;
+}
+
+.filter-days {
+  min-width: 200px;
+}
+
+.days-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.days-control input[type="number"] {
+  width: 72px;
+}
+
+.day-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.day-preset {
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.day-preset:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.day-preset.active {
+  background: var(--chip);
+  color: var(--text);
+  border-color: var(--accent);
 }
 
 /* Searchable company filter */

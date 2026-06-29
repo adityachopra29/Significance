@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { EventStudy, FeedItemDetail, getDetail } from "@/lib/api";
-import { fmtNum, fmtPct, prettyEventType, scoreColor, timeAgo } from "@/lib/format";
+import { fmtNum, fmtPct, prettyEventType, scoreColor, timeAgo, formatAnnouncedAt } from "@/lib/format";
 import {
   COMPOSITE_SCORE,
   DIRECTION,
@@ -132,7 +132,9 @@ export default function DetailDrawer({
                   <InfoTip help={SENTIMENT} />
                 </span>
               )}
-              <span>{timeAgo(detail.announced_at)}</span>
+              <span title={timeAgo(detail.announced_at)}>
+                {formatAnnouncedAt(detail.announced_at)}
+              </span>
             </div>
 
             {detail.summary && (
@@ -142,7 +144,22 @@ export default function DetailDrawer({
               </div>
             )}
 
-            {!detail.summary && detail.headline && detail.analysis_status !== "done" && (
+            {!detail.summary &&
+              detail.headline &&
+              detail.analysis_status === "done" && (
+                <div className="section">
+                  <h3>Headline</h3>
+                  <div>{detail.headline}</div>
+                  <p className="disclaimer" style={{ marginTop: 12 }}>
+                    Analysis data is missing for this filing (likely from an incomplete database
+                    migration). It will not be re-analyzed unless re-queued.
+                  </p>
+                </div>
+              )}
+
+            {!detail.summary &&
+              detail.headline &&
+              detail.analysis_status !== "done" && (
               <div className="section">
                 <h3>Headline</h3>
                 <div>{detail.headline}</div>

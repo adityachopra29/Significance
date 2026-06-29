@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   FeedItem,
@@ -10,12 +11,14 @@ import {
   getStats,
   subscribeFeedEvents,
 } from "@/lib/api";
-import { prettyEventType, scoreColor, timeAgo } from "@/lib/format";
+import { prettyEventType, scoreColor, timeAgo, formatAnnouncedAt } from "@/lib/format";
 import DetailDrawer from "@/components/DetailDrawer";
 import ManageStocks from "@/components/ManageStocks";
 import CompanySearch from "@/components/CompanySearch";
 
 const PAGE_SIZE = 50;
+const DAY_PRESETS = [1, 3, 7, 14, 30, 90] as const;
+const MAX_FEED_DAYS = 90;
 
 export default function Dashboard() {
   const [view, setView] = useState<FeedView>("live");
@@ -36,6 +39,7 @@ export default function Dashboard() {
   const [companyId, setCompanyId] = useState("");
   const [liveSort, setLiveSort] = useState<"category" | "recency">("category");
   const [rankedSort, setRankedSort] = useState<"score" | "recency">("score");
+  const [, setTick] = useState(0);
 
   const sortBy = view === "live" ? liveSort : rankedSort;
 
@@ -78,6 +82,11 @@ export default function Dashboard() {
   useEffect(() => {
     getEventTypes(view).then(setEventTypes).catch(() => {});
   }, [view]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((t) => t + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const upsertItem = useCallback(
     (eventType: string, incoming: FeedItem) => {
@@ -150,17 +159,32 @@ export default function Dashboard() {
   const subtitle = useMemo(
     () =>
       view === "live"
-        ? "All triage-passed filings · sorted by event category or recency"
-        : "LLM-analyzed filings · sorted by relevance score or recency",
-    [view],
+        ? `Triage-passed filings · past ${days} day${days === 1 ? "" : "s"}`
+        : `LLM-analyzed filings · past ${days} day${days === 1 ? "" : "s"}`,
+    [view, days],
   );
+
+  const setDaysClamped = (value: number) => {
+    const n = Math.min(MAX_FEED_DAYS, Math.max(1, Math.round(value) || 1));
+    setDays(n);
+  };
 
   return (
     <div className="container">
       <div className="header">
-        <div>
-          <div className="title">Significance</div>
-          <div className="subtitle">{subtitle}</div>
+        <div className="brand">
+          <Image
+            src="/logo.png"
+            alt="Significance"
+            width={40}
+            height={40}
+            className="brand-logo"
+            priority
+          />
+          <div>
+            <div className="title">Significance</div>
+            <div className="subtitle">{subtitle}</div>
+          </div>
         </div>
         <div className="statbar">
           {stats && (
@@ -231,13 +255,30 @@ export default function Dashboard() {
             )}
           </select>
         </label>
-        <label>
-          Window
-          <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
-            <option value={7}>Past 7 days</option>
-            <option value={14}>Past 14 days</option>
-            <option value={15}>Past 15 days</option>
-          </select>
+        <label className="filter-days">
+          Past days
+          <div className="days-control">
+            <input
+              type="number"
+              min={1}
+              max={MAX_FEED_DAYS}
+              value={days}
+              onChange={(e) => setDaysClamped(Number(e.target.value))}
+              aria-label="Past N days"
+            />
+            <div className="day-presets" role="group" aria-label="Day presets">
+              {DAY_PRESETS.map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  className={days === d ? "day-preset active" : "day-preset"}
+                  onClick={() => setDays(d)}
+                >
+                  {d}d
+                </button>
+              ))}
+            </div>
+          </div>
         </label>
         {view === "ranked" && (
           <label>
@@ -325,13 +366,17 @@ export default function Dashboard() {
                   {it.analysis_status === "processing" && (
                     <span className="chip status-processing">Analyzing…</span>
                   )}
-                  {it.analysis_status === "done" && view === "live" && (
+                  {it.analysis_status === "done" &&
+                    (it.summary != null || it.composite_score != null) &&
+                    view === "live" && (
                     <span className="chip status-done">Analyzed</span>
                   )}
                   {view === "ranked" && it.direction && (
                     <span className={`dir ${it.direction}`}>{it.direction}</span>
                   )}
-                  <span>{timeAgo(it.announced_at)}</span>
+                  <span title={timeAgo(it.announced_at)}>
+                    {formatAnnouncedAt(it.announced_at)}
+                  </span>
                 </div>
               </div>
             </div>
